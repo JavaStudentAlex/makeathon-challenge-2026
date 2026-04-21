@@ -1,0 +1,46 @@
+repos:
+  - repo: local
+    hooks:
+      - id: isort
+        name: isort (uv)
+        language: system
+        entry: uv run isort
+        types: [python]
+        pass_filenames: true
+        args: [--settings-path, pyproject.toml, --diff]
+
+      - id: black
+        name: black (uv)
+        language: system
+        entry: uv run black
+        types: [python]
+        pass_filenames: true
+        args: [--config, pyproject.toml, --diff]
+
+      - id: flake8
+        name: flake8 (uv)
+        language: system
+        entry: uv run flake8
+        types: [python]
+        pass_filenames: true
+        args: [--toml-config, pyproject.toml]
+
+      - id: mypy
+        name: mypy (uv)
+        language: system
+        entry: uv run mypy
+        types: [python]
+        pass_filenames: true
+        args: [--config-file, pyproject.toml]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-json
+      - id: pretty-format-json
+        args: [--no-ensure-ascii]
+      - id: check-yaml
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: debug-statements
+        files: ^.*\.py$

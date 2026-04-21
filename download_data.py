@@ -1,13 +1,13 @@
-# download a specific folder from an s3 bucket using boto3
+"""Download the challenge dataset from a public S3 bucket."""
+
 import argparse
 import logging
 from pathlib import Path
 
 import boto3
-
 from botocore import UNSIGNED
 from botocore.config import Config
-from botocore.exceptions import NoCredentialsError, ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -66,9 +66,19 @@ def download_s3_folder(bucket_name: str, folder_name: str, local_dir: str = "./d
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Download a folder from an S3 bucket using boto3")
-    parser.add_argument("--bucket_name", default="osapiens-terra-challenge", help="Name of the S3 bucket")
-    parser.add_argument("--folder_name", default="makeathon-challenge", help="Name of the folder inside the S3 bucket")
+    parser = argparse.ArgumentParser(
+        description="Download a folder from an S3 bucket using boto3"
+    )
+    parser.add_argument(
+        "--bucket_name",
+        default="osapiens-terra-challenge",
+        help="Name of the S3 bucket",
+    )
+    parser.add_argument(
+        "--folder_name",
+        default="makeathon-challenge",
+        help="Name of the folder inside the S3 bucket",
+    )
     parser.add_argument("--local_dir", default="./data", help="Local directory to save files")
 
     args = parser.parse_args()
