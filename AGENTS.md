@@ -76,6 +76,11 @@ High-level contracts:
   nodata handling, and label encoding.
 - Do not invent data contracts that are not present in the notebook, README, or
   code.
+- For user-facing random choice, probabilistic selection, or diversity prompts
+  where no appropriate external RNG or tool applies, load
+  `.github/skills/string-seed-of-thought/SKILL.md`; keep it out of geospatial
+  data interpretation, raster processing, submission generation, model
+  evaluation, seeded experiments, benchmark analysis, and factual claims.
 - When combining modalities, reproject and resample deliberately; do not assume
   shared CRS or grid alignment.
 - Preserve geospatial metadata when transforming rasters: CRS, transform, band
@@ -103,6 +108,16 @@ High-level contracts:
 - Read-only QA overlay:
   `.github/instructions/qa_readonly.instructions.md`
 
+## Repository-Specific Skills
+
+- Python linting skill: `.github/skills/python-linting/SKILL.md`
+- Python testing skill: `.github/skills/python-testing/SKILL.md`
+- String Seed of Thought skill:
+  `.github/skills/string-seed-of-thought/SKILL.md`
+- Native String Seed of Thought mirror:
+  `.agents/skills/string-seed-of-thought/SKILL.md`, mirrored into
+  `.claude/skills/string-seed-of-thought`
+
 ## Mandatory Guardrails
 
 1. Treat `AGENTS.md` as the base repository contract for this project.
@@ -113,5 +128,7 @@ High-level contracts:
 4. Use `uv` for dependency management and Python execution.
 5. Double-check that the final report matches the actual edits, verification,
    and remaining risks.
+6. Never use String Seed of Thought for factual geospatial claims, data
+   contracts, submissions, evaluation results, or benchmark reporting.
 
 @/home/alex/.codex/RTK.md

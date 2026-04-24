@@ -59,6 +59,9 @@ line_length = 88
 addopts = [
     "--import-mode=importlib",
 ]
+pythonpath = [
+    ".",
+]
 
 [tool.coverage.run]
 source = [

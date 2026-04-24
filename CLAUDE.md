@@ -14,6 +14,14 @@ submission-format work, also load:
 
 - `.github/instructions/data_contracts.instructions.md`
 
+For user-facing random choices, probabilistic selection, or diversity prompts
+where no appropriate external RNG or tool applies, load:
+
+- `.github/skills/string-seed-of-thought/SKILL.md`
+
+Do not use that skill for factual answers, raster/data interpretation,
+submission generation, evaluation, benchmark reporting, or result claims.
+
 ## Tooling Rules
 
 - Prefer `rtk` for shell commands when it is available in the runtime.
