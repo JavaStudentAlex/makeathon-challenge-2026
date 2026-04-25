@@ -11,7 +11,7 @@ from stats_models import (
     spatial_consensus_and_time_median,
     spatial_consensus_and_timing,
 )
-from stats_models.runner import generate_submission
+from stats_models.runner import _default_output_dir, generate_submission
 from submission_utils import validate_submission_geojson
 
 FEATURE_KEYS = (
@@ -315,6 +315,23 @@ class _BrokenModelModule:
         }
 
 
+class _MainStyleModelModule:
+    __name__ = "__main__"
+
+    class __spec__:
+        name = "stats_models.fake_promoted_model"
+
+    @staticmethod
+    def run_experiment(features: dict[str, np.ndarray], threshold: float = 0.52):
+        del threshold
+        shape = next(iter(features.values())).shape
+        return {
+            "prediction": np.ones(shape, dtype=np.uint8),
+            "probabilities": np.ones(shape, dtype=np.float32),
+            "time_step": np.full(shape, 2307, dtype=np.uint16),
+        }
+
+
 def test_generate_submission_validates_run_experiment_contract(
     tmp_path: Path,
 ) -> None:
@@ -331,6 +348,32 @@ def test_generate_submission_validates_run_experiment_contract(
             tiles=["tile_a"],
             feature_builder=_make_synthetic_feature_builder(positive=True),
         )
+
+
+def test_default_output_dir_uses_canonical_module_name() -> None:
+    assert _default_output_dir(_MainStyleModelModule) == Path(
+        "submission/fake_promoted_model"
+    )
+
+
+def test_generate_submission_uses_canonical_module_name_in_manifest(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "synthetic_data"
+    data_root.mkdir()
+    _write_metadata(data_root, ["tile_a"])
+
+    _, manifest_path = generate_submission(
+        _MainStyleModelModule,
+        data_root,
+        tmp_path / "output",
+        split="test",
+        tiles=["tile_a"],
+        feature_builder=_make_synthetic_feature_builder(positive=True),
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["program_path"] == "stats_models.fake_promoted_model"
 
 
 def test_eligibility_and_patch_votes_run_experiment_contract() -> None:

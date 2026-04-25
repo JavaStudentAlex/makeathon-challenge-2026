@@ -34,6 +34,25 @@ class SupportsRunExperiment(Protocol):
     ) -> dict[str, Any]: ...
 
 
+def _canonical_module_name(model_module: SupportsRunExperiment) -> str:
+    """Return a stable module name for manifests and default output paths."""
+
+    spec = getattr(model_module, "__spec__", None)
+    spec_name = getattr(spec, "name", None)
+    if spec_name:
+        return spec_name
+
+    module_name = getattr(model_module, "__name__", None)
+    if module_name and module_name != "__main__":
+        return module_name
+
+    file_path = getattr(model_module, "__file__", None)
+    if file_path:
+        return Path(file_path).stem
+
+    return model_module.__class__.__name__
+
+
 def _tile_ids_from_metadata(data_root: Path, split: str) -> list[str]:
     metadata_path = data_root / "metadata" / f"{split}_tiles.geojson"
     if not metadata_path.exists():
@@ -125,9 +144,10 @@ def generate_submission(
     tile_ids = _tile_ids_from_metadata(data_root, split) if tiles is None else list(tiles)
     run_experiment = _resolve_run_experiment(model_module)
     output_dir.mkdir(parents=True, exist_ok=True)
+    module_name = _canonical_module_name(model_module)
 
     manifest: dict[str, Any] = {
-        "program_path": getattr(model_module, "__name__", model_module.__class__.__name__),
+        "program_path": module_name,
         "split": split,
         "threshold": threshold,
         "min_area_ha": min_area_ha,
@@ -230,7 +250,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
 
 def _default_output_dir(model_module: SupportsRunExperiment) -> Path:
-    module_name = getattr(model_module, "__name__", "submission")
+    module_name = _canonical_module_name(model_module)
     return Path("submission") / module_name.rsplit(".", maxsplit=1)[-1]
 
 
