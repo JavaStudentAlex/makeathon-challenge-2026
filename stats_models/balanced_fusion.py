@@ -1,8 +1,8 @@
-"""Balanced simple ensemble promoted from ``gen_73``.
+"""Promoted statistical model: balanced_fusion (from gen_73).
 
 This module preserves the evolved public contract and formula block from
 ``results/simple_ensembles/gen_73/original.py`` while adding the maintained
-empty-feature diagnostic used by promoted simple-ensemble modules.
+empty-feature diagnostic used by promoted statistical-model modules.
 """
 
 from __future__ import annotations

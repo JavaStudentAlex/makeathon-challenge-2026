@@ -11,6 +11,7 @@ from stats_models import (
     spatial_consensus_and_time_median,
     spatial_consensus_and_timing,
 )
+import stats_models.runner as runner
 from stats_models.runner import _default_output_dir, generate_submission
 from submission_utils import validate_submission_geojson
 
@@ -286,6 +287,161 @@ def test_generate_submission_uses_metadata_tile_ids_when_tiles_none(
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert [tile["tile_id"] for tile in manifest["tiles"]] == tile_ids
+
+
+class _AlignmentModelModule:
+    __name__ = "stats_models.aligned_model"
+    alignment_calls: list[dict[str, object]] = []
+
+    @staticmethod
+    def run_experiment(features: dict[str, np.ndarray], threshold: float = 0.52):
+        score = np.asarray(features["score"], dtype=np.float32)
+        prediction = (score >= threshold).astype(np.uint8)
+        return {
+            "prediction": prediction,
+            "probabilities": score,
+            "time_step": np.where(prediction == 1, 2307, 0).astype(np.uint16),
+        }
+
+    @classmethod
+    def fit_submission_alignment(
+        cls,
+        *,
+        data_root: Path,
+        split: str,
+        tiles: list[str],
+        initial_threshold: float,
+        feature_builder,
+    ):
+        cls.alignment_calls.append(
+            {
+                "data_root": data_root,
+                "split": split,
+                "tiles": tiles,
+                "initial_threshold": initial_threshold,
+                "feature_builder": feature_builder,
+            }
+        )
+        return {
+            "method": "synthetic_test_alignment",
+            "threshold": 0.8,
+            "metric": "pixel_iou",
+            "metric_value": 0.75,
+        }
+
+
+def _alignment_feature_builder(data_root: Path, tile_id: str, split: str):
+    del data_root, tile_id, split
+    shape = (8, 8)
+    return _synthetic_reference(shape), {
+        "score": np.full(shape, 0.7, dtype=np.float32),
+    }
+
+
+def test_generate_submission_aligns_threshold_from_all_train_metadata_tiles(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "synthetic_data"
+    data_root.mkdir()
+    _write_metadata(data_root, ["test_tile"], split="test")
+    train_tiles = ["train_a", "train_b", "train_c"]
+    _write_metadata(data_root, train_tiles, split="train")
+    _AlignmentModelModule.alignment_calls = []
+
+    _, manifest_path = generate_submission(
+        _AlignmentModelModule,
+        data_root,
+        tmp_path / "output",
+        split="test",
+        tiles=None,
+        threshold=0.52,
+        feature_builder=_alignment_feature_builder,
+        align_train=True,
+        min_area_ha=0.0,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["threshold"] == pytest.approx(0.8)
+    assert manifest["alignment"]["enabled"] is True
+    assert manifest["alignment"]["split"] == "train"
+    assert manifest["alignment"]["tile_ids"] == train_tiles
+    assert manifest["alignment"]["initial_threshold"] == pytest.approx(0.52)
+    assert manifest["alignment"]["method"] == "synthetic_test_alignment"
+    assert manifest["tiles"][0]["positive_pixels"] == 0
+
+    assert len(_AlignmentModelModule.alignment_calls) == 1
+    alignment_call = _AlignmentModelModule.alignment_calls[0]
+    assert alignment_call["split"] == "train"
+    assert alignment_call["tiles"] == train_tiles
+    assert alignment_call["initial_threshold"] == pytest.approx(0.52)
+
+
+class _GenericAlignmentModelModule:
+    __name__ = "stats_models.generic_aligned_model"
+
+    @staticmethod
+    def run_experiment(features: dict[str, np.ndarray], threshold: float = 0.52):
+        score = np.asarray(features["score"], dtype=np.float32)
+        prediction = (score >= threshold).astype(np.uint8)
+        return {
+            "prediction": prediction,
+            "probabilities": score,
+            "time_step": np.where(prediction == 1, 2307, 0).astype(np.uint16),
+        }
+
+
+def test_generate_submission_uses_generic_alignment_without_model_hook(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reference = _synthetic_reference((2, 2))
+    train_score = np.array(
+        [[0.9, 0.8], [0.7, 0.1]],
+        dtype=np.float32,
+    )
+    target = np.array(
+        [[1, 0], [0, 0]],
+        dtype=np.uint8,
+    )
+
+    def feature_builder(data_root: Path, tile_id: str, split: str):
+        del data_root, tile_id
+        if split == "train":
+            return reference, {"score": train_score}
+        shape = (8, 8)
+        return _synthetic_reference(shape), {
+            "score": np.full(shape, 0.7, dtype=np.float32),
+        }
+
+    def fake_target(data_root: Path, tile_id: str, target_reference: ReferenceGrid):
+        del data_root
+        assert tile_id == "train_tile"
+        assert target_reference == reference
+        return target, np.zeros(reference.shape, dtype=np.uint16)
+
+    monkeypatch.setattr(runner, "target_from_train_labels", fake_target)
+
+    _, manifest_path = generate_submission(
+        _GenericAlignmentModelModule,
+        tmp_path,
+        tmp_path / "generic_output",
+        split="test",
+        tiles=["test_tile"],
+        threshold=0.52,
+        feature_builder=feature_builder,
+        align_train=True,
+        alignment_tiles=["train_tile"],
+        min_area_ha=0.0,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["threshold"] == pytest.approx(0.81)
+    assert manifest["alignment"]["method"] == (
+        "generic_weak_train_label_pixel_iou_threshold_grid"
+    )
+    assert manifest["alignment"]["metric_value"] == pytest.approx(1.0)
+    assert manifest["alignment"]["tile_ids"] == ["train_tile"]
+    assert manifest["tiles"][0]["positive_pixels"] == 0
 
 
 def test_generate_submission_raises_for_missing_data_root(tmp_path: Path) -> None:

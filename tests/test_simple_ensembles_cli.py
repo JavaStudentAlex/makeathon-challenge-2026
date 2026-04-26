@@ -5,28 +5,28 @@ from types import ModuleType
 
 import pytest
 
-import simple_ensembles
-import simple_ensembles.balanced_fusion as balanced_fusion
-import simple_ensembles.high_recall_fusion as high_recall_fusion
-import simple_ensembles.top_ranked_fusion as top_ranked_fusion
+import stats_models
+import stats_models.balanced_fusion as balanced_fusion
+import stats_models.high_recall_fusion as high_recall_fusion
+import stats_models.top_ranked_fusion as top_ranked_fusion
 import stats_models.runner as runner
 from stats_models.runner import _default_output_dir
 
 PROMOTED_MODULES = (
     pytest.param(
-        "simple_ensembles.top_ranked_fusion",
+        "stats_models.top_ranked_fusion",
         top_ranked_fusion,
         Path("submission/top_ranked_fusion"),
         id="top_ranked_fusion",
     ),
     pytest.param(
-        "simple_ensembles.balanced_fusion",
+        "stats_models.balanced_fusion",
         balanced_fusion,
         Path("submission/balanced_fusion"),
         id="balanced_fusion",
     ),
     pytest.param(
-        "simple_ensembles.high_recall_fusion",
+        "stats_models.high_recall_fusion",
         high_recall_fusion,
         Path("submission/high_recall_fusion"),
         id="high_recall_fusion",
@@ -35,13 +35,16 @@ PROMOTED_MODULES = (
 
 
 def test_package_exports_expose_all_promoted_modules() -> None:
-    from simple_ensembles import (
+    from stats_models import (
         balanced_fusion as package_balanced_fusion,
         high_recall_fusion as package_high_recall_fusion,
         top_ranked_fusion as package_top_ranked_fusion,
     )
 
-    assert set(simple_ensembles.__all__) == {
+    assert set(stats_models.__all__) == {
+        "eligibility_and_patch_votes",
+        "spatial_consensus_and_time_median",
+        "spatial_consensus_and_timing",
         "top_ranked_fusion",
         "balanced_fusion",
         "high_recall_fusion",
@@ -90,6 +93,9 @@ def test_python_m_shim_delegates_to_shared_runner(
         threshold=0.52,
         min_area_ha=0.5,
         feature_builder=None,
+        align_train=False,
+        alignment_split="train",
+        alignment_tiles=None,
     ):
         captured["model_module"] = model_module
         captured["data_root"] = data_root
@@ -99,6 +105,9 @@ def test_python_m_shim_delegates_to_shared_runner(
         captured["threshold"] = threshold
         captured["min_area_ha"] = min_area_ha
         captured["feature_builder"] = feature_builder
+        captured["align_train"] = align_train
+        captured["alignment_split"] = alignment_split
+        captured["alignment_tiles"] = alignment_tiles
         return tmp_path / "submission.geojson", tmp_path / "manifest.json"
 
     monkeypatch.setattr(runner, "generate_submission", fake_generate_submission)
@@ -137,6 +146,11 @@ def test_python_m_shim_delegates_to_shared_runner(
     assert captured["tiles"] == ["tile_a", "tile_b"]
     assert captured["threshold"] == pytest.approx(0.61)
     assert captured["min_area_ha"] == pytest.approx(1.25)
+    assert captured["align_train"] is (
+        module_name == "stats_models.top_ranked_fusion"
+    )
+    assert captured["alignment_split"] == "train"
+    assert captured["alignment_tiles"] is None
 
     captured_module = captured["model_module"]
     assert isinstance(captured_module, ModuleType)

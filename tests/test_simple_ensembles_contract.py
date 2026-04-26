@@ -1,10 +1,14 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
+from rasterio.transform import from_origin
 
-import simple_ensembles
-import simple_ensembles.balanced_fusion as balanced_fusion
-import simple_ensembles.high_recall_fusion as high_recall_fusion
-import simple_ensembles.top_ranked_fusion as top_ranked_fusion
+import stats_models
+import stats_models.balanced_fusion as balanced_fusion
+import stats_models.high_recall_fusion as high_recall_fusion
+import stats_models.top_ranked_fusion as top_ranked_fusion
+from shinka.features import ReferenceGrid
 
 RESULT_KEYS = {"probabilities", "prediction", "time_step", "year"}
 MODULES = (
@@ -67,7 +71,10 @@ def _assert_result_contract(
 
 
 def test_package_exports_all_promoted_modules() -> None:
-    assert set(simple_ensembles.__all__) == {
+    assert set(stats_models.__all__) == {
+        "eligibility_and_patch_votes",
+        "spatial_consensus_and_time_median",
+        "spatial_consensus_and_timing",
         "balanced_fusion",
         "high_recall_fusion",
         "top_ranked_fusion",
@@ -124,3 +131,61 @@ def test_run_experiment_threshold_only_changes_prediction_outputs(module) -> Non
 def test_run_experiment_rejects_empty_feature_mapping(module) -> None:
     with pytest.raises(ValueError, match="features must contain at least one array"):
         module.run_experiment({})
+
+
+def test_top_ranked_alignment_uses_train_labels_to_select_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reference = ReferenceGrid(
+        shape=(2, 2),
+        transform=from_origin(500000, 1000, 100, 100),
+        crs="EPSG:32618",
+    )
+    probabilities = np.array(
+        [[0.9, 0.8], [0.7, 0.1]],
+        dtype=np.float32,
+    )
+    target = np.array(
+        [[1, 0], [0, 0]],
+        dtype=np.uint8,
+    )
+
+    def feature_builder(data_root: Path, tile_id: str, split: str):
+        del data_root
+        assert tile_id == "train_tile"
+        assert split == "train"
+        return reference, {"probabilities": probabilities}
+
+    def fake_probability(features):
+        return features["probabilities"]
+
+    def fake_target(data_root: Path, tile_id: str, target_reference: ReferenceGrid):
+        del data_root
+        assert tile_id == "train_tile"
+        assert target_reference == reference
+        return target, np.zeros(reference.shape, dtype=np.uint16)
+
+    monkeypatch.setattr(
+        top_ranked_fusion,
+        "predict_deforestation_probability",
+        fake_probability,
+    )
+    monkeypatch.setattr(top_ranked_fusion, "target_from_train_labels", fake_target)
+
+    alignment = top_ranked_fusion.fit_submission_alignment(
+        data_root=tmp_path,
+        split="train",
+        tiles=["train_tile"],
+        initial_threshold=0.52,
+        feature_builder=feature_builder,
+    )
+
+    assert alignment["status"] == "aligned"
+    assert alignment["threshold"] == pytest.approx(0.81)
+    assert alignment["metric"] == "pixel_iou"
+    assert alignment["metric_value"] == pytest.approx(1.0)
+    assert alignment["tile_count"] == 1
+    assert alignment["target_pixels"] == 1
+    assert alignment["predicted_pixels"] == 1
+    assert alignment["true_positive_pixels"] == 1

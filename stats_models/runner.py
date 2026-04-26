@@ -12,10 +12,17 @@ import numpy as np
 import rasterio
 
 from shinka.features import ReferenceGrid, build_model_features
+from shinka.labels import target_from_train_labels
 from submission_utils import raster_to_geojson, validate_submission_geojson
 
 DEFAULT_DATA_ROOT = Path("data/makeathon-challenge")
 REQUIRED_RESULT_KEYS = ("prediction", "probabilities", "time_step")
+ALIGNMENT_THRESHOLDS = tuple(
+    float(value)
+    for value in np.concatenate(
+        [np.arange(0.05, 0.951, 0.01), np.array([0.97, 0.98, 0.99])]
+    )
+)
 
 
 FeatureBuilder = Callable[[Path, str, str], tuple[ReferenceGrid, dict[str, np.ndarray]]]
@@ -76,6 +83,161 @@ def _resolve_run_experiment(
     return run_experiment
 
 
+def _fit_generic_threshold_alignment(
+    model_module: SupportsRunExperiment,
+    run_experiment: Callable[..., dict[str, Any]],
+    *,
+    data_root: Path,
+    split: str,
+    tiles: list[str],
+    initial_threshold: float,
+    feature_builder: FeatureBuilder,
+) -> dict[str, Any]:
+    """Fit a global probability threshold from weak train labels."""
+
+    if split != "train":
+        raise ValueError(
+            "generic alignment uses train-only labels; split must be train"
+        )
+
+    thresholds = np.asarray(ALIGNMENT_THRESHOLDS, dtype=np.float32)
+    true_positive_pixels = np.zeros(thresholds.shape, dtype=np.int64)
+    predicted_pixels = np.zeros(thresholds.shape, dtype=np.int64)
+    target_pixels = 0
+    total_pixels = 0
+    tile_summaries: list[dict[str, Any]] = []
+
+    for tile_id in tiles:
+        reference, features = feature_builder(data_root, tile_id, split)
+        result = run_experiment(features, threshold=initial_threshold)
+        if not isinstance(result, dict) or "probabilities" not in result:
+            module_name = getattr(model_module, "__name__", repr(model_module))
+            raise ValueError(
+                f"{module_name}.run_experiment(...) must return a dict containing "
+                "probabilities for generic train alignment"
+            )
+
+        probabilities = np.nan_to_num(
+            np.asarray(result["probabilities"], dtype=np.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        target, _target_time_step = target_from_train_labels(
+            data_root, tile_id, reference
+        )
+        target_bool = target.astype(bool)
+
+        if probabilities.shape != target_bool.shape:
+            raise ValueError(
+                f"alignment target for {tile_id} has shape {target_bool.shape}, "
+                f"expected {probabilities.shape}"
+            )
+
+        tile_target_pixels = int(np.count_nonzero(target_bool))
+        target_pixels += tile_target_pixels
+        total_pixels += int(target_bool.size)
+
+        for index, threshold in enumerate(thresholds):
+            prediction = probabilities >= threshold
+            predicted_pixels[index] += int(np.count_nonzero(prediction))
+            true_positive_pixels[index] += int(
+                np.count_nonzero(prediction & target_bool)
+            )
+
+        tile_summaries.append(
+            {
+                "tile_id": tile_id,
+                "target_pixels": tile_target_pixels,
+                "mean_probability": float(np.mean(probabilities)),
+                "max_probability": float(np.max(probabilities)),
+            }
+        )
+
+    union_pixels = predicted_pixels + target_pixels - true_positive_pixels
+    pixel_iou = np.divide(
+        true_positive_pixels,
+        union_pixels,
+        out=np.zeros(thresholds.shape, dtype=np.float64),
+        where=union_pixels > 0,
+    )
+
+    if target_pixels == 0:
+        best_index = int(np.argmin(np.abs(thresholds - initial_threshold)))
+        status = "skipped_no_positive_train_labels"
+    else:
+        best_iou = float(np.max(pixel_iou))
+        candidate_indices = np.flatnonzero(np.isclose(pixel_iou, best_iou))
+        closest_to_initial = np.argmin(
+            np.abs(thresholds[candidate_indices] - initial_threshold)
+        )
+        best_index = int(candidate_indices[closest_to_initial])
+        status = "aligned"
+
+    return {
+        "method": "generic_weak_train_label_pixel_iou_threshold_grid",
+        "status": status,
+        "threshold": float(thresholds[best_index]),
+        "metric": "pixel_iou",
+        "metric_value": float(pixel_iou[best_index]),
+        "tile_count": len(tiles),
+        "total_pixels": total_pixels,
+        "target_pixels": target_pixels,
+        "predicted_pixels": int(predicted_pixels[best_index]),
+        "true_positive_pixels": int(true_positive_pixels[best_index]),
+        "union_pixels": int(union_pixels[best_index]),
+        "threshold_grid": {
+            "min": float(np.min(thresholds)),
+            "max": float(np.max(thresholds)),
+            "count": int(thresholds.size),
+        },
+        "tile_summaries": tile_summaries,
+    }
+
+
+def _fit_submission_alignment(
+    model_module: SupportsRunExperiment,
+    run_experiment: Callable[..., dict[str, Any]],
+    *,
+    data_root: Path,
+    split: str,
+    tiles: list[str],
+    initial_threshold: float,
+    feature_builder: FeatureBuilder,
+) -> dict[str, Any]:
+    module_name = getattr(model_module, "__name__", repr(model_module))
+    fit_alignment = getattr(model_module, "fit_submission_alignment", None)
+    if fit_alignment is None or not callable(fit_alignment):
+        alignment = _fit_generic_threshold_alignment(
+            model_module,
+            run_experiment,
+            data_root=data_root,
+            split=split,
+            tiles=tiles,
+            initial_threshold=initial_threshold,
+            feature_builder=feature_builder,
+        )
+    else:
+        alignment = fit_alignment(
+            data_root=data_root,
+            split=split,
+            tiles=tiles,
+            initial_threshold=initial_threshold,
+            feature_builder=feature_builder,
+        )
+
+    if not isinstance(alignment, dict):
+        raise ValueError(f"{module_name} alignment must return a dict")
+    if "threshold" not in alignment:
+        raise ValueError(f"{module_name} alignment must return a threshold")
+
+    threshold = float(alignment["threshold"])
+    if not np.isfinite(threshold):
+        raise ValueError(f"{module_name} alignment returned a non-finite threshold")
+
+    return {**alignment, "threshold": threshold}
+
+
 def _write_raster(
     path: Path,
     data: np.ndarray,
@@ -133,6 +295,9 @@ def generate_submission(
     threshold: float = 0.52,
     min_area_ha: float = 0.5,
     feature_builder: FeatureBuilder = build_model_features,
+    align_train: bool = False,
+    alignment_split: str = "train",
+    alignment_tiles: Iterable[str] | None = None,
 ) -> tuple[Path, Path]:
     """Run a promoted statistical model across tiles and emit a submission bundle."""
 
@@ -141,10 +306,46 @@ def generate_submission(
     if not data_root.exists():
         raise FileNotFoundError(f"Data root not found: {data_root}")
 
-    tile_ids = _tile_ids_from_metadata(data_root, split) if tiles is None else list(tiles)
+    tile_ids = (
+        _tile_ids_from_metadata(data_root, split) if tiles is None else list(tiles)
+    )
     run_experiment = _resolve_run_experiment(model_module)
     output_dir.mkdir(parents=True, exist_ok=True)
     module_name = _canonical_module_name(model_module)
+
+    alignment: dict[str, Any] | None = None
+    if align_train:
+        resolved_alignment_tiles = (
+            _tile_ids_from_metadata(data_root, alignment_split)
+            if alignment_tiles is None
+            else list(alignment_tiles)
+        )
+        if not resolved_alignment_tiles:
+            raise ValueError("train alignment requires at least one alignment tile")
+
+        initial_threshold = threshold
+        alignment = _fit_submission_alignment(
+            model_module,
+            run_experiment,
+            data_root=data_root,
+            split=alignment_split,
+            tiles=resolved_alignment_tiles,
+            initial_threshold=initial_threshold,
+            feature_builder=feature_builder,
+        )
+        threshold = float(alignment["threshold"])
+        alignment = {
+            "enabled": True,
+            "split": alignment_split,
+            "tile_ids": resolved_alignment_tiles,
+            **alignment,
+            "initial_threshold": initial_threshold,
+            "threshold": threshold,
+        }
+        print(
+            f"aligned threshold {threshold:.4f} using "
+            f"{len(resolved_alignment_tiles)} {alignment_split} tiles"
+        )
 
     manifest: dict[str, Any] = {
         "program_path": module_name,
@@ -153,6 +354,8 @@ def generate_submission(
         "min_area_ha": min_area_ha,
         "tiles": [],
     }
+    if alignment is not None:
+        manifest["alignment"] = alignment
     tile_feature_collections: list[dict[str, Any]] = []
 
     raster_dir = output_dir / "rasters"
@@ -228,13 +431,11 @@ def generate_submission(
     with open(manifest_path, "w", encoding="utf-8") as file:
         json.dump(manifest, file, indent=2)
 
-    print(
-        f"wrote {submission_path} with {len(submission['features'])} total features"
-    )
+    print(f"wrote {submission_path} with {len(submission['features'])} total features")
     return submission_path, manifest_path
 
 
-def build_argparser() -> argparse.ArgumentParser:
+def build_argparser(*, align_train_default: bool = False) -> argparse.ArgumentParser:
     """Build the CLI parser shared by promoted model entrypoints."""
 
     parser = argparse.ArgumentParser(
@@ -246,6 +447,17 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--tiles", nargs="*")
     parser.add_argument("--threshold", type=float, default=0.52)
     parser.add_argument("--min-area-ha", type=float, default=0.5)
+    parser.add_argument(
+        "--align-train",
+        action=argparse.BooleanOptionalAction,
+        default=align_train_default,
+        help=(
+            "fit a supported model's submission alignment on train metadata tiles "
+            "before generating the requested split"
+        ),
+    )
+    parser.add_argument("--alignment-split", default="train")
+    parser.add_argument("--alignment-tiles", nargs="*")
     return parser
 
 
@@ -254,10 +466,15 @@ def _default_output_dir(model_module: SupportsRunExperiment) -> Path:
     return Path("submission") / module_name.rsplit(".", maxsplit=1)[-1]
 
 
-def run_from_cli(model_module: SupportsRunExperiment, argv: list[str] | None = None) -> int:
+def run_from_cli(
+    model_module: SupportsRunExperiment,
+    argv: list[str] | None = None,
+    *,
+    align_train_default: bool = False,
+) -> int:
     """CLI entrypoint used by promoted model shims under ``stats_models/``."""
 
-    parser = build_argparser()
+    parser = build_argparser(align_train_default=align_train_default)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     output_dir = args.output_dir or _default_output_dir(model_module)
     generate_submission(
@@ -268,6 +485,9 @@ def run_from_cli(model_module: SupportsRunExperiment, argv: list[str] | None = N
         tiles=args.tiles,
         threshold=args.threshold,
         min_area_ha=args.min_area_ha,
+        align_train=args.align_train,
+        alignment_split=args.alignment_split,
+        alignment_tiles=args.alignment_tiles,
     )
     return 0
 

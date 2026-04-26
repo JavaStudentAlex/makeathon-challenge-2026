@@ -1,9 +1,8 @@
-"""Top-ranked simple ensemble promoted from ``gen_87`` / ``best``.
+"""Promoted statistical model: high_recall_fusion (from gen_61).
 
 This module preserves the evolved public contract and formula block from
-``results/simple_ensembles/gen_87/original.py``, whose artifact is byte-identical
-to ``results/simple_ensembles/best/original.py`` and carries the top
-``combined_score`` in the tracked metrics.
+``results/simple_ensembles/gen_61/original.py`` while adding the maintained
+empty-feature diagnostic used by promoted statistical-model modules.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from contextlib import contextmanager
 from typing import Any, Mapping
 
 import numpy as np
-
 
 ArrayMap = Mapping[str, np.ndarray]
 TRAINING_TIMEOUT_SECONDS = 30 * 60
@@ -101,16 +99,6 @@ def _normalized_signals(features: ArrayMap) -> dict[str, np.ndarray]:
         "aef": _positive_signal(_feature(features, "aef_shift"), 0.85),
         "alert": np.clip(_feature(features, "alert_consensus"), 0.0, 1.0),
         "seasonal": _positive_signal(_feature(features, "seasonal_drop"), 0.60),
-        "ndvi_z": _drop_signal(_feature(features, "ndvi_zscore"), 3.0),
-        "nbr_z": _drop_signal(_feature(features, "nbr_zscore"), 3.0),
-        "ndmi_z": _drop_signal(_feature(features, "ndmi_zscore"), 3.0),
-        "bsi_z": _positive_signal(_feature(features, "bsi_zscore"), 3.0),
-        "vv_z": _drop_signal(_feature(features, "vv_zscore"), 3.0),
-        "water": np.clip(_feature(features, "water"), 0.0, 1.0),
-        "crop": np.clip(_feature(features, "crop"), 0.0, 1.0),
-        "urban": np.clip(_feature(features, "urban"), 0.0, 1.0),
-        "bare": np.clip(_feature(features, "bare"), 0.0, 1.0),
-        "cloud": np.clip(_feature(features, "cloud"), 0.0, 1.0),
     }
 
 
@@ -219,115 +207,14 @@ def _prototype_distance_model(signals: dict[str, np.ndarray]) -> np.ndarray:
 
 
 def _sensor_agreement_model(signals: dict[str, np.ndarray]) -> np.ndarray:
-    """Require vegetation/moisture loss, structure loss, and exposure to agree."""
+    """Require vegetation/moisture loss and bare-soil exposure to agree."""
 
-    optical_drop = np.mean(
-        np.stack(
-            [signals["ndvi"], signals["nbr"], signals["ndmi"], signals["ndre"]],
-            axis=0,
-        ),
-        axis=0,
-    )
-    structural_drop = np.mean(
-        np.stack([signals["vv"], signals["vv_cv"], signals["aef"]], axis=0),
-        axis=0,
-    )
+    optical_drop = np.maximum(signals["nbr"], signals["ndmi"])
     exposure = np.maximum(
-        np.maximum(signals["bsi"], signals["bare"]),
+        signals["bsi"],
         0.55 * signals["nbr"] + 0.45 * signals["ndmi"],
     )
-    positive = np.minimum(optical_drop, exposure)
-    positive = np.minimum(
-        positive, 0.55 + 0.45 * np.maximum(structural_drop, signals["alert"])
-    )
-    penalty = np.maximum.reduce(
-        [
-            signals["water"],
-            signals["crop"],
-            signals["urban"],
-            signals["cloud"],
-            signals["seasonal"],
-            signals["ndwi"],
-        ]
-    )
-    return np.clip(positive - 0.45 * penalty, 0.0, 1.0)
-
-
-def _temporal_anomaly_model(signals: dict[str, np.ndarray]) -> np.ndarray:
-    """EWMA/z-score-style anomaly score with raw-delta fallback evidence."""
-
-    optical_z = (
-        0.31 * signals["nbr_z"]
-        + 0.27 * signals["ndmi_z"]
-        + 0.20 * signals["ndvi_z"]
-        + 0.22 * signals["bsi_z"]
-    )
-    abrupt_delta = (
-        0.28 * signals["nbr"]
-        + 0.27 * signals["ndmi"]
-        + 0.20 * signals["bsi"]
-        + 0.15 * signals["ndvi"]
-        + 0.10 * signals["vv"]
-    )
-    sar_z = 0.68 * signals["vv_z"] + 0.32 * signals["vv_cv"]
-    anomaly = 0.48 * optical_z + 0.34 * abrupt_delta + 0.18 * sar_z
-
-    negative_context = np.maximum.reduce(
-        [signals["water"], signals["cloud"], signals["seasonal"], signals["ndwi"]]
-    )
-    return np.clip(anomaly - 0.22 * negative_context, 0.0, 1.0).astype(np.float32)
-
-
-def _mean_filter3x3(values: np.ndarray) -> np.ndarray:
-    """Cheap local consensus filter used as support, not as a new predictor."""
-
-    padded = np.pad(values.astype(np.float32, copy=False), 1, mode="edge")
-    return (
-        padded[:-2, :-2]
-        + padded[:-2, 1:-1]
-        + padded[:-2, 2:]
-        + padded[1:-1, :-2]
-        + padded[1:-1, 1:-1]
-        + padded[1:-1, 2:]
-        + padded[2:, :-2]
-        + padded[2:, 1:-1]
-        + padded[2:, 2:]
-    ) / 9.0
-
-
-def _conservative_fusion_model(signals: dict[str, np.ndarray]) -> np.ndarray:
-    """Blend shallow model families with explicit negative-evidence suppression."""
-
-    optical_core = np.mean(
-        np.stack(
-            [signals["ndvi"], signals["nbr"], signals["ndmi"], signals["ndre"]],
-            axis=0,
-        ),
-        axis=0,
-    )
-    structural_core = np.mean(
-        np.stack([signals["vv"], signals["vv_cv"], signals["aef"]], axis=0),
-        axis=0,
-    )
-    context_penalty = np.maximum.reduce(
-        [signals["water"], signals["crop"], signals["urban"], signals["cloud"]]
-    )
-
-    margin = (
-        2.35 * _linear_margin_model(signals)
-        + 0.85 * _rule_vote_model(signals)
-        + 0.70 * _stump_ensemble_model(signals)
-        + 0.55 * _prototype_distance_model(signals)
-        + 1.10 * _sensor_agreement_model(signals)
-        + 0.55 * _temporal_anomaly_model(signals)
-        + 0.75 * np.minimum(1.0, 0.5 * optical_core + 0.5 * structural_core)
-        + 0.35 * signals["alert"]
-        - 1.85 * context_penalty
-        - 0.95 * signals["seasonal"]
-        - 0.75 * signals["ndwi"]
-        - 2.10
-    )
-    return _safe_sigmoid(margin)
+    return np.minimum(optical_drop, exposure)
 
 
 def predict_deforestation_probability(features: ArrayMap) -> np.ndarray:
@@ -335,36 +222,19 @@ def predict_deforestation_probability(features: ArrayMap) -> np.ndarray:
 
     signals = _normalized_signals(features)
     linear = _linear_margin_model(signals)
-    rules = _rule_vote_model(signals)
-    stumps = _stump_ensemble_model(signals)
+    rule_vote = _rule_vote_model(signals)
+    stump_vote = _stump_ensemble_model(signals)
     prototype = _prototype_distance_model(signals)
     agreement = _sensor_agreement_model(signals)
-    anomaly = _temporal_anomaly_model(signals)
-    conservative = _conservative_fusion_model(signals)
 
     raw_probability = (
-        0.42 * linear
-        + 0.09 * rules
-        + 0.07 * stumps
-        + 0.05 * prototype
-        + 0.14 * agreement
-        + 0.10 * anomaly
-        + 0.13 * conservative
+        0.78 * linear
+        + 0.09 * rule_vote
+        + 0.06 * stump_vote
+        + 0.03 * prototype
+        + 0.04 * agreement
     )
-
-    local_support = _mean_filter3x3(raw_probability)
-    strong_clearing = (
-        (signals["bsi"] > 0.76)
-        & (np.maximum(signals["nbr"], signals["ndmi"]) > 0.66)
-        & (np.maximum(agreement, anomaly) > 0.48)
-    )
-    isolated_weak = (raw_probability > 0.46) & (local_support < 0.31) & ~strong_clearing
-
-    clustered = 0.78 * raw_probability + 0.22 * local_support
-    clustered = np.where(isolated_weak, 0.84 * clustered, clustered)
-    clustered = np.maximum(clustered, np.where(strong_clearing, raw_probability, 0.0))
-
-    calibrated = _safe_sigmoid(11.0 * (clustered - 0.545))
+    calibrated = _safe_sigmoid(10.0 * (raw_probability - 0.725))
     return calibrated.astype(np.float32) * signals["forest"]
 
 

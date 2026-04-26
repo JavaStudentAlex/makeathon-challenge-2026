@@ -7,7 +7,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 from shinka.features import ReferenceGrid
-from simple_ensembles import balanced_fusion, high_recall_fusion, top_ranked_fusion
+from stats_models import balanced_fusion, high_recall_fusion, top_ranked_fusion
 from stats_models.runner import generate_submission
 from submission_utils import validate_submission_geojson
 
@@ -93,7 +93,7 @@ def _assert_time_step_raster(path: Path, reference: ReferenceGrid) -> np.ndarray
 
 
 @pytest.mark.parametrize("module", MODULES)
-def test_generate_submission_builds_valid_bundle_for_promoted_simple_ensembles(
+def test_generate_submission_builds_valid_bundle_for_promoted_stats_models(
     tmp_path: Path,
     module,
 ) -> None:

@@ -2,11 +2,15 @@ import importlib
 from pathlib import Path
 
 import pytest
+import stats_models
 
 PROMOTED_MODULES = (
     "stats_models.eligibility_and_patch_votes",
     "stats_models.spatial_consensus_and_time_median",
     "stats_models.spatial_consensus_and_timing",
+    "stats_models.balanced_fusion",
+    "stats_models.high_recall_fusion",
+    "stats_models.top_ranked_fusion",
 )
 
 
@@ -17,6 +21,17 @@ def test_promoted_stats_model_modules_expose_callable_run_experiment(
     module = importlib.import_module(module_name)
 
     assert callable(getattr(module, "run_experiment", None))
+
+
+def test_stats_models_package_exports_promoted_modules() -> None:
+    assert set(stats_models.__all__) == {
+        "eligibility_and_patch_votes",
+        "spatial_consensus_and_time_median",
+        "spatial_consensus_and_timing",
+        "balanced_fusion",
+        "high_recall_fusion",
+        "top_ranked_fusion",
+    }
 
 
 def test_retired_shinka_generator_is_absent() -> None:
