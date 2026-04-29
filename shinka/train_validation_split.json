@@ -1,0 +1,63 @@
+{
+  "data_root": "/home/jovyan/makeathon-challenge-2026/data/makeathon-challenge",
+  "train_metadata_path": "/home/jovyan/makeathon-challenge-2026/data/makeathon-challenge/metadata/train_tiles.geojson",
+  "test_metadata_path": "/home/jovyan/makeathon-challenge-2026/data/makeathon-challenge/metadata/test_tiles.geojson",
+  "area_crs": "EPSG:6933",
+  "max_distance_km": 500.0,
+  "train_tile_ids": [
+    "48PUT_0_8",
+    "48QWD_2_2",
+    "48PXC_7_7",
+    "48PYB_3_6",
+    "47QQV_2_4",
+    "48QVE_3_0",
+    "18NXH_6_8",
+    "18NWG_6_6",
+    "18NWJ_8_9",
+    "18NYH_9_9",
+    "19NBD_4_4",
+    "18NWM_9_4"
+  ],
+  "validation_tile_ids": [
+    "18NWH_1_4",
+    "18NXJ_7_6",
+    "47QMB_0_8",
+    "48PWV_7_8"
+  ],
+  "nearest_train_by_test": [
+    {
+      "test_tile_id": "18NVJ_1_6",
+      "train_tile_id": "18NWH_1_4",
+      "distance_km": 128.11042822820045
+    },
+    {
+      "test_tile_id": "18NYH_2_1",
+      "train_tile_id": "18NXJ_7_6",
+      "distance_km": 70.70374485673354
+    },
+    {
+      "test_tile_id": "33NTE_5_1",
+      "train_tile_id": "19NBD_4_4",
+      "distance_km": 9336.15202065623
+    },
+    {
+      "test_tile_id": "47QMA_6_2",
+      "train_tile_id": "47QMB_0_8",
+      "distance_km": 72.1358296260246
+    },
+    {
+      "test_tile_id": "48PWA_0_6",
+      "train_tile_id": "48PWV_7_8",
+      "distance_km": 138.97652673016233
+    }
+  ],
+  "selected_test_tile_ids": [
+    "18NVJ_1_6",
+    "18NYH_2_1",
+    "47QMA_6_2",
+    "48PWA_0_6"
+  ],
+  "excluded_test_tile_ids": [
+    "33NTE_5_1"
+  ]
+}

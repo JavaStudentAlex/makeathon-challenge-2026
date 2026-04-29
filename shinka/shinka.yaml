@@ -1,0 +1,126 @@
+# Config for:
+#   shinka_run --task-dir shinka --config-fname shinka.yaml \
+#     --results_dir results/shinka_simple_ml --num_generations 100
+#
+# The bundled ground truth is a smoke target that proves the local Shinka
+# evaluator can produce metrics. Replace it with a validation GeoJSON generated
+# from train labels before running a serious challenge optimization.
+
+max_evaluation_jobs: 2
+max_proposal_jobs: 4
+max_db_workers: 2
+verbose: true
+
+evo:
+  task_sys_msg: |
+    You are evolving shinka/initial.py for the osapiens Makeathon 2026
+    deforestation challenge. The program must define run_experiment() and return
+    a GeoJSON FeatureCollection, a GeoDataFrame, a path, or a dict containing a
+    GeoJSON/path. The evaluator scores polygon overlap and temporal year
+    accuracy, so useful changes should improve spatial precision/recall without
+    breaking time_step/year properties.
+
+    Use simple ML ideas from deep-research-report.md before reaching for deep
+    models. Prioritize compact, robust code that can run locally in minutes.
+
+    Shallow model ideas:
+    - Train and blend XGBoost, LightGBM, and SVM/RBF models over engineered
+      patch or pixel features. Average calibrated probabilities first; only add
+      stacking if there is a real validation signal.
+    - Keep a fixed physics-inspired prior in the ensemble so candidates remain
+      sensible when labels are weak or sparse.
+    - Tune one global threshold against validation polygon IoU or pixel IoU,
+      then consider separate high-recall and high-precision variants.
+    - Try bagged shallow ensembles over bootstrap samples, feature subsets, and
+      conservative/high-recall thresholds.
+
+    Feature ideas:
+    - Forest-in-2020 eligibility gate. Deforestation should be impossible where
+      baseline forest evidence is absent.
+    - Optical drops and anomalies: NDVI, NBR, NDMI, EVI, NDRE, BSI, NDWI,
+      month-to-month deltas, 3/6/12 month rolling drops, and standardized
+      z-score anomalies against local history.
+    - SAR structure loss: Sentinel-1 VV drop, VV coefficient-of-variation
+      change, and orbit-separated ascending/descending features.
+    - AlphaEarth semantic shift: yearly 64-dimensional embedding distance or
+      compact PCA/norm summaries as land-cover-transition evidence.
+    - Weak-label consensus: combine RADD, GLAD-L, and GLAD-S2 agreement for
+      candidate sampling and timing, but do not treat alerts as area truth by
+      themselves.
+    - Negative context features: water/flooding, crop, urban, bare soil,
+      cloud/shadow, and seasonal-drop indicators to suppress false positives.
+    - Spatial cleanup: local consensus filters, minimum-patch support, and
+      small-polygon filtering, while preserving valid EPSG:4326 GeoJSON output.
+
+    Hard constraints:
+    - Keep run_experiment() deterministic and bounded.
+    - Keep each evaluated model/training run under 30 minutes. Preserve
+      TRAINING_TIMEOUT_SECONDS = 30 * 60, prefer model-native max_iter,
+      n_estimators, early-stopping, and n_jobs controls, and do not remove the
+      evaluator run_timeout_seconds guard.
+    - Do not require the real challenge dataset for smoke evaluation.
+    - Do not silently reinterpret raw labels without explicit decoding logic.
+    - Keep edits inside # EVOLVE-BLOCK-START / # EVOLVE-BLOCK-END regions and
+      preserve those markers for future generations.
+    - Preserve the evaluator contract and return valid GeoJSON.
+  num_generations: 100
+  max_api_costs: 100
+  patch_types:
+    - diff
+    - full
+    - cross
+  patch_type_probs:
+    - 0.6
+    - 0.3
+    - 0.1
+  max_patch_resamples: 2
+  max_patch_attempts: 1
+  max_novelty_attempts: 1
+  # Keep evaluator concurrency bounded while allowing proposal generation to
+  # stay ahead of available evaluation slots.
+  enable_controlled_oversubscription: true
+  proposal_target_mode: fixed
+  proposal_buffer_max: 2
+  proposal_target_hard_cap: 4
+  meta_rec_interval: 5
+  # Source the repo .env before running so LOCAL_OPENAI_API_KEY is available
+  # to the local OpenAI-compatible proxy used for proposal models.
+  llm_models:
+    - local/claude-opus-4-7@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
+    - local/claude-sonnet-4-6@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
+    - local/gpt-5.5@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
+    - local/gpt-5.4@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
+    - local/gpt-5.4-mini@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
+    - local/gemini-3-flash-preview@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
+  llm_dynamic_selection: ucb
+  llm_kwargs:
+    temperatures:
+      - 0.0
+      - 0.5
+      - 1.0
+    max_tokens: 16384
+  # Direct Ollama embeddings server exposed via OpenAI-compatible /v1.
+  embedding_model: local/qwen3-embedding:8b@http://localhost:11434/v1
+  code_embed_sim_threshold: 0.995
+  use_text_feedback: true
+
+db:
+  num_islands: 2
+  archive_size: 24
+  elite_selection_ratio: 0.25
+  num_archive_inspirations: 3
+  num_top_k_inspirations: 2
+  migration_interval: 8
+  migration_rate: 0.1
+  island_elitism: true
+  parent_selection_strategy: weighted
+  exploitation_ratio: 0.25
+
+job:
+  # The evaluator enforces 1800 seconds for candidate execution; this gives it
+  # a short grace window to write failure metrics before the job wrapper kills it.
+  time: "00:31:00"
+  numeric_threads_per_job: 1
+  extra_cmd_args:
+    run_timeout_seconds: 1800
+    ground_truth_path: /home/jovyan/makeathon-challenge-2026/shinka/smoke_ground_truth.geojson

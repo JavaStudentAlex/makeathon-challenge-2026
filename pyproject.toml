@@ -40,6 +40,7 @@ experiments = [
     "scikit-learn>=1.7.2",
     "scipy>=1.15.3",
     "shap>=0.49.1",
+    "shinka-evolve>=0.0.5",
     "xgboost>=3.2.0",
 ]
 gpu-experiments = [
