@@ -1,8 +1,9 @@
 """Polygon scoring metrics for Shinka evolution runs.
 
-The primary score is Union IoU over the spatial union of all predicted and
-scored ground-truth polygons. Year accuracy is computed from per-feature
-``time_step`` or ``year`` properties when temporal labels are present.
+The final score combines Union IoU, Polygon Recall, Polygon Level FPR, and Year
+Accuracy. Union IoU remains the largest component because it is the primary
+ranking metric. Year accuracy is computed from per-feature ``time_step`` or
+``year`` properties when temporal labels are present.
 """
 
 from __future__ import annotations
@@ -26,6 +27,12 @@ from shapely.validation import make_valid
 DEFAULT_INPUT_CRS = "EPSG:4326"
 DEFAULT_AREA_CRS = "EPSG:6933"
 DEFAULT_RUN_TIMEOUT_SECONDS = 30 * 60
+COMBINED_SCORE_WEIGHTS = {
+    "union_iou": 0.40,
+    "polygon_recall": 0.20,
+    "false_positive_control": 0.20,
+    "year_accuracy": 0.20,
+}
 
 GeoJSONInput = dict[str, Any] | str | Path | gpd.GeoDataFrame
 
@@ -59,7 +66,8 @@ def calculate_scoring_metrics(
 
     Returns:
         A metrics dictionary containing ``combined_score`` and the four public
-        scoring metrics. ``combined_score`` is the Union IoU.
+        scoring metrics. ``combined_score`` is the weighted final score Shinka
+        uses for candidate selection.
     """
 
     pred_gdf = _load_geodataframe(predictions, default_input_crs=default_input_crs)
@@ -82,9 +90,17 @@ def calculate_scoring_metrics(
         float(false_positive_area / predicted_area) if predicted_area > 0.0 else 0.0
     )
     year_accuracy = _calculate_year_accuracy(pred_gdf, truth_gdf)
+    combined_score = _calculate_combined_score(
+        union_iou=union_iou,
+        polygon_recall=polygon_recall,
+        polygon_level_fpr=polygon_level_fpr,
+        year_accuracy=year_accuracy,
+        predicted_area=predicted_area,
+        ground_truth_area=ground_truth_area,
+    )
 
     return {
-        "combined_score": union_iou,
+        "combined_score": combined_score,
         "union_iou": union_iou,
         "polygon_recall": polygon_recall,
         "polygon_level_fpr": polygon_level_fpr,
@@ -95,6 +111,32 @@ def calculate_scoring_metrics(
         "spatial_union_area": spatial_union_area,
         "false_positive_area": false_positive_area,
     }
+
+
+def _calculate_combined_score(
+    *,
+    union_iou: float,
+    polygon_recall: float,
+    polygon_level_fpr: float,
+    year_accuracy: float,
+    predicted_area: float,
+    ground_truth_area: float,
+) -> float:
+    recall_score = (
+        polygon_recall if ground_truth_area > 0.0 else float(predicted_area == 0.0)
+    )
+    false_positive_control = (
+        1.0 - polygon_level_fpr
+        if predicted_area > 0.0
+        else float(ground_truth_area == 0.0)
+    )
+    combined_score = (
+        COMBINED_SCORE_WEIGHTS["union_iou"] * union_iou
+        + COMBINED_SCORE_WEIGHTS["polygon_recall"] * recall_score
+        + COMBINED_SCORE_WEIGHTS["false_positive_control"] * false_positive_control
+        + COMBINED_SCORE_WEIGHTS["year_accuracy"] * year_accuracy
+    )
+    return float(np.clip(combined_score, 0.0, 1.0))
 
 
 def score_geojson(

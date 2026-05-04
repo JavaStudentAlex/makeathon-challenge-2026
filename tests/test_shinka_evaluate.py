@@ -67,6 +67,7 @@ def test_calculate_scoring_metrics_penalizes_partial_overlap_and_extra_area() ->
 
     metrics = shinka_evaluate.calculate_scoring_metrics(predictions, ground_truth)
 
+    assert metrics["combined_score"] == pytest.approx(0.4)
     assert metrics["union_iou"] == pytest.approx(50.0 / 150.0)
     assert metrics["polygon_recall"] == pytest.approx(0.5)
     assert metrics["polygon_level_fpr"] == pytest.approx(0.5)
@@ -80,6 +81,7 @@ def test_calculate_scoring_metrics_penalizes_wrong_years_by_area() -> None:
 
     metrics = shinka_evaluate.calculate_scoring_metrics(predictions, ground_truth)
 
+    assert metrics["combined_score"] == pytest.approx(0.8)
     assert metrics["union_iou"] == pytest.approx(1.0)
     assert metrics["polygon_recall"] == pytest.approx(1.0)
     assert metrics["polygon_level_fpr"] == pytest.approx(0.0)
@@ -171,6 +173,7 @@ def test_calculate_scoring_metrics_penalizes_missing_prediction_time() -> None:
 
     metrics = shinka_evaluate.calculate_scoring_metrics(predictions, ground_truth)
 
+    assert metrics["combined_score"] == pytest.approx(0.8)
     assert metrics["union_iou"] == pytest.approx(1.0)
     assert metrics["year_accuracy"] == pytest.approx(0.0)
 
@@ -181,6 +184,7 @@ def test_calculate_scoring_metrics_handles_empty_predictions() -> None:
 
     metrics = shinka_evaluate.calculate_scoring_metrics(predictions, ground_truth)
 
+    assert metrics["combined_score"] == pytest.approx(0.0)
     assert metrics["union_iou"] == pytest.approx(0.0)
     assert metrics["polygon_recall"] == pytest.approx(0.0)
     assert metrics["polygon_level_fpr"] == pytest.approx(0.0)
