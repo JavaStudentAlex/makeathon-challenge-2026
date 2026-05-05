@@ -34,10 +34,11 @@ shinka:
 		source .env; \
 	fi; \
 	set +a; \
-	if [ -z "$${OPENAI_API_KEY:-}" ] && [ -z "$${LOCAL_OPENAI_API_KEY:-}" ]; then \
-		echo "Set OPENAI_API_KEY or LOCAL_OPENAI_API_KEY in .env before running shinka"; \
+	if [ -z "$${CUSTOM_OPENAI_API_KEY:-}" ] && [ -z "$${OPENAI_API_KEY:-}" ] && [ -z "$${LOCAL_OPENAI_API_KEY:-}" ]; then \
+		echo "Set CUSTOM_OPENAI_API_KEY, OPENAI_API_KEY, or LOCAL_OPENAI_API_KEY before running shinka"; \
 		exit 1; \
 	fi; \
-	export OPENAI_API_KEY="$${OPENAI_API_KEY:-$${LOCAL_OPENAI_API_KEY}}"; \
-	export LOCAL_OPENAI_API_KEY="$${LOCAL_OPENAI_API_KEY:-$${OPENAI_API_KEY}}"; \
+	export CUSTOM_OPENAI_API_KEY="$${CUSTOM_OPENAI_API_KEY:-$${LOCAL_OPENAI_API_KEY:-$${OPENAI_API_KEY}}}"; \
+	export OPENAI_API_KEY="$${OPENAI_API_KEY:-$${CUSTOM_OPENAI_API_KEY}}"; \
+	export LOCAL_OPENAI_API_KEY="$${LOCAL_OPENAI_API_KEY:-$${CUSTOM_OPENAI_API_KEY}}"; \
 	shinka_run --task-dir shinka --results_dir results/shinka_simple_ml --num_generations 100 --config-fname shinka.yaml

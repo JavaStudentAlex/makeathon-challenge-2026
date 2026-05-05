@@ -181,15 +181,15 @@ evo:
   proposal_buffer_max: 0
   proposal_target_hard_cap: 2
   meta_rec_interval: 5
-  # Source the repo .env before running so LOCAL_OPENAI_API_KEY is available
+  # Source the repo .env or shell profile before running so CUSTOM_OPENAI_API_KEY is available
   # to the local OpenAI-compatible proxy used for proposal models.
   llm_models:
-    - local/claude-opus-4-7@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
-    - local/claude-sonnet-4-6@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
-    - local/gpt-5.5@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
-    - local/gpt-5.4@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
-    - local/gpt-5.4-mini@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
-    - local/gemini-3-flash-preview@http://localhost:8318/v1?api_key_env=LOCAL_OPENAI_API_KEY
+    - local/claude-opus-4-7@http://localhost:8318/v1?api_key_env=CUSTOM_OPENAI_API_KEY
+    - local/claude-sonnet-4-6@http://localhost:8318/v1?api_key_env=CUSTOM_OPENAI_API_KEY
+    - local/gpt-5.5@http://localhost:8318/v1?api_key_env=CUSTOM_OPENAI_API_KEY
+    - local/gpt-5.4@http://localhost:8318/v1?api_key_env=CUSTOM_OPENAI_API_KEY
+    - local/gpt-5.4-mini@http://localhost:8318/v1?api_key_env=CUSTOM_OPENAI_API_KEY
+    - local/gemini-3-flash-preview@http://localhost:8318/v1?api_key_env=CUSTOM_OPENAI_API_KEY
   llm_dynamic_selection: ucb
   llm_kwargs:
     temperatures:
