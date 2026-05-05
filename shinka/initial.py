@@ -1,9 +1,10 @@
-"""Initial Shinka seed program for shallow deforestation ensembles.
+"""Initial Shinka seed program trained from training labels only.
 
-The seed is intentionally self-contained so Shinka can evaluate it without the
-downloaded challenge dataset. It trains tiny prior models on synthetic examples
-that encode the report-derived feature assumptions, then applies the ensemble
-to a few candidate patches and returns GeoJSON polygons.
+Training labels are used only as supervision for the hardcoded training split
+under ``data/makeathon-challenge/training``. The directory passed to
+``run_experiment`` is treated as unlabeled prediction input; this module never
+reads labels from that directory and does not consume a train/validation split
+JSON file.
 """
 
 # EVOLVE-BLOCK-START
@@ -13,15 +14,25 @@ import signal
 import threading
 import warnings
 from contextlib import contextmanager
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
-from shapely.geometry import box, mapping
+import rasterio
+from rasterio.enums import Resampling
+from rasterio.features import shapes
+from rasterio.warp import reproject, transform_geom
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
+DEFAULT_OUTPUT_CRS = "EPSG:4326"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+TRAINING_DATA_DIR = REPO_ROOT / "data" / "makeathon-challenge" / "training"
+RANDOM_STATE = 7
+TRAINING_TIMEOUT_SECONDS = 30 * 60
+AEF_BAND_INDEXES = tuple(range(1, 17))
 FEATURE_NAMES: tuple[str, ...] = (
     "forest_2020",
     "ndvi_delta",
@@ -45,12 +56,13 @@ FEATURE_NAMES: tuple[str, ...] = (
     "crop",
     "urban",
     "cloud",
+    *(f"aef_delta_{band:02d}" for band in AEF_BAND_INDEXES),
 )
-
-POSITIVE_GEOMETRY = box(0.0, 0.0, 0.01, 0.01)
-POSITIVE_TIME_STEP = 2308
-RANDOM_STATE = 7
-TRAINING_TIMEOUT_SECONDS = 30 * 60
+PREDICTION_THRESHOLD = 0.62
+PREDICT_DOWNSAMPLE_FACTOR = 8
+MAX_POSITIVE_SAMPLES_PER_RASTER = 512
+MAX_NEGATIVE_SAMPLES_PER_RASTER = 512
+MIN_TRAINING_EXAMPLES_PER_CLASS = 1
 
 
 class EnsembleMember(NamedTuple):
@@ -117,6 +129,7 @@ def _row(**overrides: float) -> dict[str, float]:
         "urban": 0.0,
         "cloud": 0.0,
     }
+    values.update({f"aef_delta_{band:02d}": 0.0 for band in AEF_BAND_INDEXES})
     values.update(overrides)
     return values
 
@@ -127,97 +140,67 @@ def _matrix(rows: list[dict[str, float]]) -> np.ndarray:
     )
 
 
-def _build_training_examples() -> tuple[np.ndarray, np.ndarray]:
-    """Encode report ideas as a tiny prior dataset for shallow ML models."""
+def _build_training_examples(
+    training_data_dir: str | Path = TRAINING_DATA_DIR,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build supervised examples from training features and training labels."""
 
-    positive_rows = [
-        _row(
-            ndvi_delta=-0.82,
-            nbr_delta=-0.88,
-            ndmi_delta=-0.74,
-            evi_delta=-0.63,
-            ndre_delta=-0.58,
-            bsi_delta=0.72,
-            vv_delta=-0.23,
-            vv_cv_delta=0.30,
-            aef_shift=0.82,
-            alert_consensus=0.90,
-            ndvi_zscore=-3.2,
-            nbr_zscore=-3.5,
-            ndmi_zscore=-3.0,
-            bsi_zscore=3.1,
-            vv_zscore=-2.7,
-        ),
-        _row(
-            ndvi_delta=-0.58,
-            nbr_delta=-0.77,
-            ndmi_delta=-0.70,
-            bsi_delta=0.80,
-            vv_delta=-0.30,
-            vv_cv_delta=0.34,
-            aef_shift=0.74,
-            alert_consensus=0.72,
-            nbr_zscore=-3.0,
-            ndmi_zscore=-2.7,
-            bsi_zscore=3.4,
-            vv_zscore=-3.2,
-        ),
-        _row(
-            ndvi_delta=-0.72,
-            nbr_delta=-0.92,
-            ndmi_delta=-0.62,
-            evi_delta=-0.55,
-            ndre_delta=-0.61,
-            bsi_delta=0.66,
-            aef_shift=0.88,
-            alert_consensus=0.60,
-            nbr_zscore=-3.6,
-            bsi_zscore=2.8,
-        ),
-        _row(
-            ndvi_delta=-0.49,
-            nbr_delta=-0.69,
-            ndmi_delta=-0.64,
-            bsi_delta=0.62,
-            vv_delta=-0.27,
-            aef_shift=0.70,
-            alert_consensus=0.82,
-            ndmi_zscore=-2.8,
-            vv_zscore=-2.6,
-        ),
-    ]
-    negative_rows = [
-        _row(),
-        _row(ndvi_delta=-0.25, nbr_delta=-0.20, ndmi_delta=-0.18, seasonal_drop=0.95),
-        _row(
-            ndvi_delta=-0.45,
-            nbr_delta=-0.42,
-            ndmi_delta=-0.30,
-            bsi_delta=0.20,
-            cloud=0.90,
-        ),
-        _row(
-            ndvi_delta=-0.52,
-            nbr_delta=-0.55,
-            ndmi_delta=-0.15,
-            ndwi_delta=0.95,
-            water=0.95,
-        ),
-        _row(
-            forest_2020=0.0,
-            ndvi_delta=-0.80,
-            nbr_delta=-0.85,
-            bsi_delta=0.90,
-            aef_shift=0.70,
-        ),
-        _row(bsi_delta=0.82, crop=0.90, forest_2020=0.30),
-        _row(bsi_delta=0.76, urban=0.95, forest_2020=0.20),
-        _row(alert_consensus=0.72, forest_2020=1.0, nbr_delta=-0.12),
-    ]
+    training_data_dir = Path(training_data_dir)
+    if not training_data_dir.is_dir():
+        raise FileNotFoundError(
+            f"Training data directory not found: {training_data_dir}"
+        )
 
-    rows = positive_rows + negative_rows
-    labels = np.asarray([1] * len(positive_rows) + [0] * len(negative_rows), dtype=int)
-    return _matrix(rows), labels
+    rows: list[dict[str, float]] = []
+    labels: list[int] = []
+    rng = np.random.default_rng(RANDOM_STATE)
+    for tile_id in _training_tile_ids(training_data_dir):
+        baseline_path = _aef_path(training_data_dir, tile_id, 2020)
+        if baseline_path is None:
+            continue
+        label_targets: tuple[np.ndarray, np.ndarray] | None = None
+        for year, current_path in _aef_year_paths(training_data_dir, tile_id):
+            if year <= 2020:
+                continue
+            feature_grid, profile = _aef_feature_grid(baseline_path, current_path)
+            if label_targets is None:
+                label_targets = _training_label_targets(
+                    training_data_dir,
+                    tile_id,
+                    profile,
+                )
+            label_years, _label_time_steps = label_targets
+            positive_mask = label_years == year
+            negative_mask = label_years == 0
+            _append_sampled_examples(
+                rows,
+                labels,
+                feature_grid,
+                positive_mask,
+                1,
+                MAX_POSITIVE_SAMPLES_PER_RASTER,
+                rng,
+            )
+            _append_sampled_examples(
+                rows,
+                labels,
+                feature_grid,
+                negative_mask,
+                0,
+                MAX_NEGATIVE_SAMPLES_PER_RASTER,
+                rng,
+            )
+
+    y_train = np.asarray(labels, dtype=int)
+    if (
+        y_train.size == 0
+        or np.count_nonzero(y_train == 1) < MIN_TRAINING_EXAMPLES_PER_CLASS
+        or np.count_nonzero(y_train == 0) < MIN_TRAINING_EXAMPLES_PER_CLASS
+    ):
+        raise ValueError(
+            "Training labels did not produce both positive and negative examples"
+        )
+    return _matrix(rows), y_train
 
 
 def _fit_ensemble(x_train: np.ndarray, y_train: np.ndarray) -> list[EnsembleMember]:
@@ -383,98 +366,439 @@ def _predict_ensemble_probability(
     )
 
 
-def _candidate_rows() -> list[dict[str, Any]]:
-    """Candidate patches for smoke evaluation and future Shinka mutations."""
+def _training_tile_ids(training_data_dir: Path) -> list[str]:
+    label_dir = training_data_dir / "labels" / "radd"
+    return sorted(
+        path.name.removeprefix("radd_").removesuffix("_labels.tif")
+        for path in label_dir.glob("radd_*_labels.tif")
+    )
 
-    return [
-        {
-            "geometry": POSITIVE_GEOMETRY,
-            "time_step": POSITIVE_TIME_STEP,
-            "features": _row(
-                ndvi_delta=-0.86,
-                nbr_delta=-0.92,
-                ndmi_delta=-0.78,
-                evi_delta=-0.64,
-                ndre_delta=-0.61,
-                bsi_delta=0.78,
-                vv_delta=-0.25,
-                vv_cv_delta=0.32,
-                aef_shift=0.86,
-                alert_consensus=0.88,
-                ndvi_zscore=-3.4,
-                nbr_zscore=-3.7,
-                ndmi_zscore=-3.2,
-                bsi_zscore=3.3,
-                vv_zscore=-2.9,
-            ),
-        },
-        {
-            "geometry": box(0.02, 0.0, 0.03, 0.01),
-            "time_step": 0,
-            "features": _row(),
-        },
-        {
-            "geometry": box(0.0, 0.02, 0.01, 0.03),
-            "time_step": 0,
-            "features": _row(
-                ndvi_delta=-0.40,
-                nbr_delta=-0.38,
-                ndmi_delta=-0.25,
-                seasonal_drop=0.95,
-                cloud=0.40,
-            ),
-        },
-        {
-            "geometry": box(0.02, 0.02, 0.03, 0.03),
-            "time_step": 0,
-            "features": _row(
-                forest_2020=0.0,
-                ndvi_delta=-0.90,
-                nbr_delta=-0.88,
-                bsi_delta=0.88,
-                aef_shift=0.80,
-                urban=0.20,
-            ),
-        },
-    ]
+
+def _prediction_tile_ids(prediction_data_dir: Path) -> list[str]:
+    aef_root = prediction_data_dir / "aef-embeddings"
+    return sorted(
+        {"_".join(path.stem.split("_")[:-1]) for path in aef_root.glob("*.tiff")}
+    )
+
+
+def _aef_path(data_dir: Path, tile_id: str, year: int) -> Path | None:
+    path = data_dir / "aef-embeddings" / f"{tile_id}_{year}.tiff"
+    return path if path.exists() else None
+
+
+def _aef_year_paths(data_dir: Path, tile_id: str) -> list[tuple[int, Path]]:
+    paths: list[tuple[int, Path]] = []
+    for path in sorted((data_dir / "aef-embeddings").glob(f"{tile_id}_*.tiff")):
+        try:
+            year = int(path.stem.rsplit("_", maxsplit=1)[1])
+        except (IndexError, ValueError):
+            continue
+        paths.append((year, path))
+    return paths
+
+
+def _aef_feature_grid(
+    baseline_path: Path,
+    current_path: Path,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    with (
+        rasterio.open(baseline_path) as baseline_src,
+        rasterio.open(current_path) as current_src,
+    ):
+        height = max(current_src.height // PREDICT_DOWNSAMPLE_FACTOR, 1)
+        width = max(current_src.width // PREDICT_DOWNSAMPLE_FACTOR, 1)
+        baseline = baseline_src.read(
+            indexes=AEF_BAND_INDEXES,
+            out_shape=(len(AEF_BAND_INDEXES), height, width),
+            resampling=Resampling.average,
+        ).astype(np.float32)
+        current = current_src.read(
+            indexes=AEF_BAND_INDEXES,
+            out_shape=(len(AEF_BAND_INDEXES), height, width),
+            resampling=Resampling.average,
+        ).astype(np.float32)
+        transform = current_src.transform * current_src.transform.scale(
+            current_src.width / width,
+            current_src.height / height,
+        )
+        profile = {
+            "height": height,
+            "width": width,
+            "transform": transform,
+            "crs": current_src.crs,
+        }
+
+    delta = np.nan_to_num(current - baseline, nan=0.0, posinf=0.0, neginf=0.0)
+    return delta, profile
+
+
+def _feature_row_from_grid(
+    feature_grid: np.ndarray, row: int, col: int
+) -> dict[str, float]:
+    deltas = feature_grid[:, row, col]
+    aef_shift = float(np.linalg.norm(deltas) / max(len(AEF_BAND_INDEXES), 1) ** 0.5)
+    values = _row(
+        forest_2020=1.0,
+        aef_shift=aef_shift,
+        ndvi_delta=float(-deltas[0]) if deltas.size > 0 else 0.0,
+        nbr_delta=float(-deltas[1]) if deltas.size > 1 else 0.0,
+        ndmi_delta=float(-deltas[2]) if deltas.size > 2 else 0.0,
+        bsi_delta=float(deltas[3]) if deltas.size > 3 else 0.0,
+    )
+    for index, band in enumerate(AEF_BAND_INDEXES):
+        values[f"aef_delta_{band:02d}"] = float(deltas[index])
+    return values
+
+
+def _append_sampled_examples(
+    rows: list[dict[str, float]],
+    labels: list[int],
+    feature_grid: np.ndarray,
+    mask: np.ndarray,
+    label: int,
+    max_samples: int,
+    rng: np.random.Generator,
+) -> None:
+    locations = np.argwhere(mask)
+    if locations.size == 0:
+        return
+    count = min(max_samples, len(locations))
+    selected_indexes = rng.choice(len(locations), size=count, replace=False)
+    for row, col in locations[selected_indexes]:
+        rows.append(_feature_row_from_grid(feature_grid, int(row), int(col)))
+        labels.append(label)
+
+
+def _training_label_targets(
+    training_data_dir: Path,
+    tile_id: str,
+    reference_profile: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    target_years = np.zeros(
+        (reference_profile["height"], reference_profile["width"]),
+        dtype=np.int32,
+    )
+    target_time_steps = np.zeros_like(target_years)
+    label_root = training_data_dir / "labels"
+    _merge_radd_targets(
+        label_root / "radd" / f"radd_{tile_id}_labels.tif",
+        target_years,
+        target_time_steps,
+        reference_profile,
+    )
+    _merge_gladl_targets(
+        label_root / "gladl",
+        tile_id,
+        target_years,
+        target_time_steps,
+        reference_profile,
+    )
+    _merge_glads2_targets(
+        label_root / "glads2" / f"glads2_{tile_id}_alert.tif",
+        label_root / "glads2" / f"glads2_{tile_id}_alertDate.tif",
+        target_years,
+        target_time_steps,
+        reference_profile,
+    )
+    return target_years, target_time_steps
+
+
+def _merge_radd_targets(
+    path: Path,
+    target_years: np.ndarray,
+    target_time_steps: np.ndarray,
+    reference_profile: dict[str, Any],
+) -> None:
+    if not path.exists():
+        return
+    with rasterio.open(path) as src:
+        raw = src.read(1)
+        positive = raw > 0
+        time_steps, years = _radd_time_arrays(raw)
+        _merge_target_arrays(
+            positive,
+            years,
+            time_steps,
+            src,
+            target_years,
+            target_time_steps,
+            reference_profile,
+        )
+
+
+def _merge_gladl_targets(
+    label_dir: Path,
+    tile_id: str,
+    target_years: np.ndarray,
+    target_time_steps: np.ndarray,
+    reference_profile: dict[str, Any],
+) -> None:
+    for alert_path in sorted(label_dir.glob(f"gladl_{tile_id}_alert[0-9][0-9].tif")):
+        stem = alert_path.name.removeprefix("gladl_").removesuffix(".tif")
+        _tile_id, yy_text = stem.rsplit("_alert", maxsplit=1)
+        date_path = label_dir / f"gladl_{tile_id}_alertDate{yy_text}.tif"
+        if not date_path.exists():
+            continue
+        year = 2000 + int(yy_text)
+        with (
+            rasterio.open(alert_path) as alert_src,
+            rasterio.open(date_path) as date_src,
+        ):
+            alert = alert_src.read(1)
+            alert_date = date_src.read(1)
+            positive = alert > 0
+            time_steps, years = _day_of_year_time_arrays(alert_date, year)
+            _merge_target_arrays(
+                positive,
+                years,
+                time_steps,
+                alert_src,
+                target_years,
+                target_time_steps,
+                reference_profile,
+            )
+
+
+def _merge_glads2_targets(
+    alert_path: Path,
+    date_path: Path,
+    target_years: np.ndarray,
+    target_time_steps: np.ndarray,
+    reference_profile: dict[str, Any],
+) -> None:
+    if not alert_path.exists() or not date_path.exists():
+        return
+    with rasterio.open(alert_path) as alert_src, rasterio.open(date_path) as date_src:
+        alert = alert_src.read(1)
+        alert_date = date_src.read(1)
+        positive = alert >= 2
+        time_steps, years = _day_offset_time_arrays(alert_date, date(2019, 1, 1))
+        _merge_target_arrays(
+            positive,
+            years,
+            time_steps,
+            alert_src,
+            target_years,
+            target_time_steps,
+            reference_profile,
+        )
+
+
+def _merge_target_arrays(
+    positive: np.ndarray,
+    years: np.ndarray,
+    time_steps: np.ndarray,
+    source: Any,
+    target_years: np.ndarray,
+    target_time_steps: np.ndarray,
+    reference_profile: dict[str, Any],
+) -> None:
+    if not np.any(positive):
+        return
+    source_years = np.where(positive, years, 0).astype(np.int32)
+    source_time_steps = np.where(positive, time_steps, 0).astype(np.int32)
+    reprojected_years = _reproject_label_array(source_years, source, reference_profile)
+    reprojected_time_steps = _reproject_label_array(
+        source_time_steps,
+        source,
+        reference_profile,
+    )
+    update = (reprojected_years > 0) & (
+        (target_years == 0) | (reprojected_years < target_years)
+    )
+    target_years[update] = reprojected_years[update]
+    target_time_steps[update] = reprojected_time_steps[update]
+
+
+def _reproject_label_array(
+    values: np.ndarray,
+    source: Any,
+    reference_profile: dict[str, Any],
+) -> np.ndarray:
+    destination = np.zeros(
+        (reference_profile["height"], reference_profile["width"]),
+        dtype=np.int32,
+    )
+    reproject(
+        source=values,
+        destination=destination,
+        src_transform=source.transform,
+        src_crs=source.crs,
+        dst_transform=reference_profile["transform"],
+        dst_crs=reference_profile["crs"],
+        resampling=Resampling.nearest,
+    )
+    return destination
+
+
+def _prediction_candidates(
+    prediction_data_dir: Path,
+    members: list[EnsembleMember],
+    threshold: float,
+) -> list[dict[str, Any]]:
+    features: list[dict[str, Any]] = []
+    for tile_id in _prediction_tile_ids(prediction_data_dir):
+        baseline_path = _aef_path(prediction_data_dir, tile_id, 2020)
+        if baseline_path is None:
+            continue
+        for year, current_path in _aef_year_paths(prediction_data_dir, tile_id):
+            if year <= 2020:
+                continue
+            feature_grid, profile = _aef_feature_grid(baseline_path, current_path)
+            rows = [
+                _feature_row_from_grid(feature_grid, row, col)
+                for row in range(feature_grid.shape[1])
+                for col in range(feature_grid.shape[2])
+            ]
+            if not rows:
+                continue
+            x_values = _matrix(rows)
+            probabilities, model_names = _predict_ensemble_probability(
+                members,
+                x_values,
+            )
+            probability_grid = probabilities.reshape(
+                feature_grid.shape[1],
+                feature_grid.shape[2],
+            )
+            time_step = (year % 100) * 100 + 7
+            features.extend(
+                _polygonize_prediction_mask(
+                    probability_grid >= threshold,
+                    time_step,
+                    profile,
+                    tile_id,
+                    "+".join(model_names),
+                )
+            )
+    return features
+
+
+def _polygonize_prediction_mask(
+    positive: np.ndarray,
+    time_step: int,
+    profile: dict[str, Any],
+    tile_id: str,
+    model_ensemble: str,
+) -> list[dict[str, Any]]:
+    if not np.any(positive):
+        return []
+    features: list[dict[str, Any]] = []
+    values = np.where(positive, time_step, 0).astype(np.int32)
+    for geometry, value in shapes(
+        values,
+        mask=positive,
+        transform=profile["transform"],
+    ):
+        feature_time_step = int(value)
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": _to_output_crs(geometry, profile["crs"]),
+                "properties": {
+                    "tile_id": tile_id,
+                    "time_step": feature_time_step,
+                    "year": _year_from_time_step(feature_time_step),
+                    "model_ensemble": model_ensemble,
+                },
+            }
+        )
+    return features
+
+
+def _to_output_crs(geometry: dict[str, Any], crs: Any) -> dict[str, Any]:
+    if crs is None:
+        return geometry
+    source_crs = crs.to_string() if hasattr(crs, "to_string") else str(crs)
+    if source_crs == DEFAULT_OUTPUT_CRS:
+        return geometry
+    return transform_geom(source_crs, DEFAULT_OUTPUT_CRS, geometry, precision=7)
+
+
+def _first_matching_pixel(
+    values: np.ndarray,
+    positive: np.ndarray,
+    value: int,
+) -> tuple[int, int]:
+    if value > 0:
+        locations = np.argwhere(positive & (values == value))
+    else:
+        locations = np.argwhere(positive)
+    if locations.size == 0:
+        return 0, 0
+    row, col = locations[0]
+    return int(row), int(col)
+
+
+def _radd_time_arrays(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    time_steps = np.zeros(raw.shape, dtype=np.int32)
+    years = np.zeros(raw.shape, dtype=np.int32)
+    for raw_value in np.unique(raw[raw > 0]):
+        days_since = int(raw_value) % 10000
+        observed = date(2014, 12, 31) + timedelta(days=days_since)
+        time_step = (observed.year % 100) * 100 + observed.month
+        mask = raw == raw_value
+        time_steps[mask] = time_step
+        years[mask] = observed.year
+    return time_steps, years
+
+
+def _day_of_year_time_arrays(
+    day_of_year: np.ndarray,
+    year: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    time_steps = np.zeros(day_of_year.shape, dtype=np.int32)
+    years = np.zeros(day_of_year.shape, dtype=np.int32)
+    for raw_day in np.unique(day_of_year[day_of_year > 0]):
+        observed = date(year, 1, 1) + timedelta(days=int(raw_day) - 1)
+        time_step = (observed.year % 100) * 100 + observed.month
+        mask = day_of_year == raw_day
+        time_steps[mask] = time_step
+        years[mask] = observed.year
+    return time_steps, years
+
+
+def _day_offset_time_arrays(
+    day_offset: np.ndarray,
+    origin: date,
+) -> tuple[np.ndarray, np.ndarray]:
+    time_steps = np.zeros(day_offset.shape, dtype=np.int32)
+    years = np.zeros(day_offset.shape, dtype=np.int32)
+    for raw_offset in np.unique(day_offset[day_offset > 0]):
+        observed = origin + timedelta(days=int(raw_offset))
+        time_step = (observed.year % 100) * 100 + observed.month
+        mask = day_offset == raw_offset
+        time_steps[mask] = time_step
+        years[mask] = observed.year
+    return time_steps, years
+
+
+def _year_from_time_step(value: Any) -> int | None:
+    if value is None:
+        return None
+    integer = int(value)
+    if 100 <= integer <= 9999:
+        yy = integer // 100
+        month = integer % 100
+        if 0 <= yy <= 99 and 1 <= month <= 12:
+            return 2000 + yy
+    return None
 
 
 def run_experiment(
     validation_data_dir: str | Path,
-    threshold: float = 0.50,
+    threshold: float = PREDICTION_THRESHOLD,
 ) -> dict[str, Any]:
-    """Return deforestation polygons predicted by a shallow ML ensemble."""
+    """Train on hardcoded training data, then predict on unlabeled input data."""
 
-    validation_data_dir = Path(validation_data_dir)
-    if not validation_data_dir.is_dir():
+    prediction_data_dir = Path(validation_data_dir)
+    if not prediction_data_dir.is_dir():
         raise FileNotFoundError(
-            f"Validation data directory not found: {validation_data_dir}"
+            f"Prediction data directory not found: {prediction_data_dir}"
         )
-    x_train, y_train = _build_training_examples()
+    x_train, y_train = _build_training_examples(TRAINING_DATA_DIR)
     members = _fit_ensemble(x_train, y_train)
-    candidates = _candidate_rows()
-    x_candidates = _matrix([candidate["features"] for candidate in candidates])
-    probabilities, model_names = _predict_ensemble_probability(members, x_candidates)
-
-    features = []
-    for candidate, probability in zip(candidates, probabilities, strict=True):
-        time_step = int(candidate["time_step"])
-        if probability < threshold or time_step <= 0:
-            continue
-        year = 2000 + (time_step // 100)
-        features.append(
-            {
-                "type": "Feature",
-                "geometry": mapping(candidate["geometry"]),
-                "properties": {
-                    "time_step": time_step,
-                    "year": year,
-                    "probability": float(probability),
-                    "model_ensemble": "+".join(model_names),
-                },
-            }
-        )
-
+    features = _prediction_candidates(prediction_data_dir, members, threshold)
     return {"type": "FeatureCollection", "features": features}
 
 
