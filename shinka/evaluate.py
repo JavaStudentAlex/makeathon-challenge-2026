@@ -15,18 +15,25 @@ import math
 import signal
 import threading
 from contextlib import contextmanager
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
+import rasterio
+from rasterio.features import shapes
 from shapely.geometry import GeometryCollection
+from shapely.geometry import shape as shapely_shape
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
 DEFAULT_INPUT_CRS = "EPSG:4326"
 DEFAULT_AREA_CRS = "EPSG:6933"
 DEFAULT_RUN_TIMEOUT_SECONDS = 30 * 60
+REPO_ROOT = Path(__file__).resolve().parents[1]
+VALIDATION_DATA_DIR = REPO_ROOT / "data" / "makeathon-challenge" / "validation"
 COMBINED_SCORE_WEIGHTS = {
     "union_iou": 0.40,
     "polygon_recall": 0.20,
@@ -152,6 +159,225 @@ def score_geojson(
         ground_truth_geojson,
         area_crs=area_crs,
     )
+
+
+def load_validation_ground_truth(
+    validation_data_dir: str | Path = VALIDATION_DATA_DIR,
+) -> gpd.GeoDataFrame:
+    """Build scored validation polygons from labels in the validation split.
+
+    The validation split is a symlink view over held-out training tiles. These
+    label rasters are treated as validation truth with explicit raw decoding:
+    RADD nonzero alerts, GLAD-L nonzero yearly alerts, and GLAD-S2 alerts with
+    confidence >= 2.
+    """
+
+    validation_data_dir = Path(validation_data_dir)
+    if not validation_data_dir.is_dir():
+        raise FileNotFoundError(
+            f"Validation data directory not found: {validation_data_dir}"
+        )
+
+    label_root = validation_data_dir / "labels"
+    frames = [
+        *_radd_ground_truth(label_root / "radd"),
+        *_gladl_ground_truth(label_root / "gladl"),
+        *_glads2_ground_truth(label_root / "glads2"),
+    ]
+    non_empty = [frame for frame in frames if not frame.empty]
+    if not non_empty:
+        return _empty_geodataframe()
+
+    return gpd.GeoDataFrame(
+        pd.concat(non_empty, ignore_index=True),
+        geometry="geometry",
+        crs=DEFAULT_INPUT_CRS,
+    )
+
+
+def _radd_ground_truth(label_dir: Path) -> list[gpd.GeoDataFrame]:
+    frames: list[gpd.GeoDataFrame] = []
+    for path in sorted(label_dir.glob("radd_*_labels.tif")):
+        tile_id = path.name.removeprefix("radd_").removesuffix("_labels.tif")
+        with rasterio.open(path) as src:
+            raw = src.read(1)
+            positive = raw > 0
+            time_steps, years = _radd_time_arrays(raw)
+            frames.append(
+                _polygonize_temporal_mask(
+                    positive,
+                    time_steps,
+                    years,
+                    transform=src.transform,
+                    crs=src.crs,
+                    tile_id=tile_id,
+                    label_source="radd",
+                )
+            )
+    return frames
+
+
+def _gladl_ground_truth(label_dir: Path) -> list[gpd.GeoDataFrame]:
+    frames: list[gpd.GeoDataFrame] = []
+    for alert_path in sorted(label_dir.glob("gladl_*_alert[0-9][0-9].tif")):
+        stem = alert_path.name.removeprefix("gladl_").removesuffix(".tif")
+        tile_id, yy_text = stem.rsplit("_alert", maxsplit=1)
+        date_path = label_dir / f"gladl_{tile_id}_alertDate{yy_text}.tif"
+        if not date_path.exists():
+            raise FileNotFoundError(f"GLAD-L date raster not found: {date_path}")
+
+        year = 2000 + int(yy_text)
+        with (
+            rasterio.open(alert_path) as alert_src,
+            rasterio.open(date_path) as date_src,
+        ):
+            alert = alert_src.read(1)
+            alert_date = date_src.read(1)
+            positive = alert > 0
+            time_steps, years = _day_of_year_time_arrays(alert_date, year)
+            frames.append(
+                _polygonize_temporal_mask(
+                    positive,
+                    time_steps,
+                    years,
+                    transform=alert_src.transform,
+                    crs=alert_src.crs,
+                    tile_id=tile_id,
+                    label_source="gladl",
+                )
+            )
+    return frames
+
+
+def _glads2_ground_truth(label_dir: Path) -> list[gpd.GeoDataFrame]:
+    frames: list[gpd.GeoDataFrame] = []
+    for alert_path in sorted(label_dir.glob("glads2_*_alert.tif")):
+        tile_id = alert_path.name.removeprefix("glads2_").removesuffix("_alert.tif")
+        date_path = label_dir / f"glads2_{tile_id}_alertDate.tif"
+        if not date_path.exists():
+            raise FileNotFoundError(f"GLAD-S2 date raster not found: {date_path}")
+
+        with (
+            rasterio.open(alert_path) as alert_src,
+            rasterio.open(date_path) as date_src,
+        ):
+            alert = alert_src.read(1)
+            alert_date = date_src.read(1)
+            positive = alert >= 2
+            time_steps, years = _day_offset_time_arrays(alert_date, date(2019, 1, 1))
+            frames.append(
+                _polygonize_temporal_mask(
+                    positive,
+                    time_steps,
+                    years,
+                    transform=alert_src.transform,
+                    crs=alert_src.crs,
+                    tile_id=tile_id,
+                    label_source="glads2",
+                )
+            )
+    return frames
+
+
+def _polygonize_temporal_mask(
+    positive: np.ndarray,
+    time_steps: np.ndarray,
+    years: np.ndarray,
+    *,
+    transform: Any,
+    crs: Any,
+    tile_id: str,
+    label_source: str,
+) -> gpd.GeoDataFrame:
+    if not np.any(positive):
+        return _empty_geodataframe(crs=crs)
+
+    geometries = []
+    properties = []
+    values = np.where(positive, time_steps, 0).astype(np.int32)
+    for geometry, value in shapes(values, mask=positive, transform=transform):
+        time_step = int(value) if int(value) > 0 else None
+        year_value = _year_from_time_step(time_step)
+        if year_value is None:
+            row, col = _first_matching_pixel(values, positive, int(value))
+            year_value = int(years[row, col]) if years[row, col] > 0 else None
+
+        geometries.append(shapely_shape(geometry))
+        properties.append(
+            {
+                "tile_id": tile_id,
+                "label_source": label_source,
+                "time_step": time_step,
+                "year": year_value,
+            }
+        )
+
+    gdf = gpd.GeoDataFrame(properties, geometry=geometries, crs=crs)
+    if gdf.crs is None:
+        gdf = gdf.set_crs(DEFAULT_INPUT_CRS)
+    return gdf.to_crs(DEFAULT_INPUT_CRS)
+
+
+def _first_matching_pixel(
+    values: np.ndarray,
+    positive: np.ndarray,
+    value: int,
+) -> tuple[int, int]:
+    if value > 0:
+        locations = np.argwhere(positive & (values == value))
+    else:
+        locations = np.argwhere(positive)
+    if locations.size == 0:
+        return 0, 0
+    row, col = locations[0]
+    return int(row), int(col)
+
+
+def _radd_time_arrays(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    time_steps = np.zeros(raw.shape, dtype=np.int32)
+    years = np.zeros(raw.shape, dtype=np.int32)
+    for raw_value in np.unique(raw[raw > 0]):
+        days_since = int(raw_value) % 10000
+        observed = date(2014, 12, 31) + timedelta(days=days_since)
+        time_step = (observed.year % 100) * 100 + observed.month
+        mask = raw == raw_value
+        time_steps[mask] = time_step
+        years[mask] = observed.year
+    return time_steps, years
+
+
+def _day_of_year_time_arrays(
+    day_of_year: np.ndarray,
+    year: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    time_steps = np.zeros(day_of_year.shape, dtype=np.int32)
+    years = np.zeros(day_of_year.shape, dtype=np.int32)
+    for raw_day in np.unique(day_of_year[day_of_year > 0]):
+        observed = date(year, 1, 1) + timedelta(days=int(raw_day) - 1)
+        time_step = (observed.year % 100) * 100 + observed.month
+        mask = day_of_year == raw_day
+        time_steps[mask] = time_step
+        years[mask] = observed.year
+    return time_steps, years
+
+
+def _day_offset_time_arrays(
+    day_offset: np.ndarray,
+    origin: date,
+) -> tuple[np.ndarray, np.ndarray]:
+    time_steps = np.zeros(day_offset.shape, dtype=np.int32)
+    years = np.zeros(day_offset.shape, dtype=np.int32)
+    for raw_offset in np.unique(day_offset[day_offset > 0]):
+        observed = origin + timedelta(days=int(raw_offset))
+        time_step = (observed.year % 100) * 100 + observed.month
+        mask = day_offset == raw_offset
+        time_steps[mask] = time_step
+        years[mask] = observed.year
+    return time_steps, years
+
+
+def _empty_geodataframe(crs: Any = DEFAULT_INPUT_CRS) -> gpd.GeoDataFrame:
+    return gpd.GeoDataFrame({"geometry": []}, geometry="geometry", crs=crs)
 
 
 def _load_geodataframe(
@@ -375,7 +601,7 @@ def _prediction_from_program(
         run_experiment = getattr(module, "run_experiment", None)
         if run_experiment is None or not callable(run_experiment):
             raise AttributeError("Candidate program must define run_experiment()")
-        result = run_experiment()
+        result = run_experiment(validation_data_dir=_validation_data_dir())
 
     if isinstance(result, dict) and result.get("type") == "FeatureCollection":
         return result
@@ -389,6 +615,14 @@ def _prediction_from_program(
         "run_experiment() must return a FeatureCollection, GeoDataFrame, path, "
         "or a dict containing geojson/prediction_geojson/prediction_path"
     )
+
+
+def _validation_data_dir() -> Path:
+    if not VALIDATION_DATA_DIR.is_dir():
+        raise FileNotFoundError(
+            f"Validation data directory not found: {VALIDATION_DATA_DIR}"
+        )
+    return VALIDATION_DATA_DIR
 
 
 def _write_shinka_results(
@@ -416,11 +650,6 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prediction_path",
         help="Optional existing prediction GeoJSON path; skips program execution",
-    )
-    parser.add_argument(
-        "--ground_truth_path",
-        required=True,
-        help="Scored ground-truth GeoJSON path",
     )
     parser.add_argument(
         "--area_crs",
@@ -455,9 +684,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             raise ValueError("--program_path or --prediction_path is required")
 
+        ground_truth = load_validation_ground_truth(_validation_data_dir())
         metrics = calculate_scoring_metrics(
             predictions,
-            Path(args.ground_truth_path),
+            ground_truth,
             area_crs=args.area_crs,
         )
         _write_shinka_results(Path(args.results_dir), metrics, correct=True)

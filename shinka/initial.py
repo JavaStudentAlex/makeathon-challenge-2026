@@ -13,6 +13,7 @@ import signal
 import threading
 import warnings
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -438,9 +439,17 @@ def _candidate_rows() -> list[dict[str, Any]]:
     ]
 
 
-def run_experiment(threshold: float = 0.50) -> dict[str, Any]:
+def run_experiment(
+    validation_data_dir: str | Path,
+    threshold: float = 0.50,
+) -> dict[str, Any]:
     """Return deforestation polygons predicted by a shallow ML ensemble."""
 
+    validation_data_dir = Path(validation_data_dir)
+    if not validation_data_dir.is_dir():
+        raise FileNotFoundError(
+            f"Validation data directory not found: {validation_data_dir}"
+        )
     x_train, y_train = _build_training_examples()
     members = _fit_ensemble(x_train, y_train)
     candidates = _candidate_rows()
@@ -472,5 +481,11 @@ def run_experiment(threshold: float = 0.50) -> dict[str, Any]:
 if __name__ == "__main__":
     import json
 
-    print(json.dumps(run_experiment(), indent=2))
+    default_validation_dir = (
+        Path(__file__).resolve().parents[1]
+        / "data"
+        / "makeathon-challenge"
+        / "validation"
+    )
+    print(json.dumps(run_experiment(default_validation_dir), indent=2))
 # EVOLVE-BLOCK-END

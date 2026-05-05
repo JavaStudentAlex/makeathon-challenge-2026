@@ -2,9 +2,9 @@
 #   shinka_run --task-dir shinka --config-fname shinka.yaml \
 #     --results_dir results/shinka_simple_ml --num_generations 100
 #
-# The bundled ground truth is a smoke target that proves the local Shinka
-# evaluator can produce metrics. Replace it with a validation GeoJSON generated
-# from train labels before running a serious challenge optimization.
+# The evaluator reads the hardcoded validation split under
+# data/makeathon-challenge/validation. That directory is a symlink view over
+# held-out training tiles and their labels.
 
 max_evaluation_jobs: 2
 max_proposal_jobs: 4
@@ -14,11 +14,14 @@ verbose: true
 evo:
   task_sys_msg: |
     You are evolving shinka/initial.py for the osapiens Makeathon 2026
-    deforestation challenge. The program must define run_experiment() and return
-    a GeoJSON FeatureCollection, a GeoDataFrame, a path, or a dict containing a
-    GeoJSON/path. The evaluator scores polygon overlap and temporal year
-    accuracy, so useful changes should improve spatial precision/recall without
-    breaking time_step/year properties.
+    deforestation challenge. The program must define
+    run_experiment(validation_data_dir) and return a GeoJSON FeatureCollection,
+    a GeoDataFrame, a path, or a dict containing a GeoJSON/path.
+    validation_data_dir is hardcoded by shinka/evaluate.py to
+    data/makeathon-challenge/validation, which is a symlink view of the
+    held-out validation tiles. The evaluator scores polygon overlap and
+    temporal year accuracy, so useful changes should improve spatial
+    precision/recall without breaking time_step/year properties.
 
     Use simple ML ideas from deep-research-report.md before reaching for deep
     models. Prioritize compact, robust code that can run locally in minutes.
@@ -58,7 +61,7 @@ evo:
       TRAINING_TIMEOUT_SECONDS = 30 * 60, prefer model-native max_iter,
       n_estimators, early-stopping, and n_jobs controls, and do not remove the
       evaluator run_timeout_seconds guard.
-    - Do not require the real challenge dataset for smoke evaluation.
+    - Read validation features and labels from the provided validation_data_dir.
     - Do not silently reinterpret raw labels without explicit decoding logic.
     - Keep edits inside # EVOLVE-BLOCK-START / # EVOLVE-BLOCK-END regions and
       preserve those markers for future generations.
@@ -123,4 +126,3 @@ job:
   numeric_threads_per_job: 1
   extra_cmd_args:
     run_timeout_seconds: 1800
-    ground_truth_path: /home/jovyan/makeathon-challenge-2026/shinka/smoke_ground_truth.geojson

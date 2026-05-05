@@ -3,8 +3,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-import pytest
-
 
 def _load_module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -15,24 +13,16 @@ def _load_module(name: str, path: Path):
     return module
 
 
-def test_initial_seed_program_produces_evaluable_metric() -> None:
+def test_initial_seed_program_accepts_validation_data_dir(tmp_path: Path) -> None:
     repo_root = Path(__file__).parents[1]
     initial = _load_module("local_shinka_initial", repo_root / "shinka" / "initial.py")
-    evaluate = _load_module(
-        "local_shinka_evaluate",
-        repo_root / "shinka" / "evaluate.py",
-    )
+    validation_data_dir = tmp_path / "validation"
+    validation_data_dir.mkdir()
 
-    prediction = initial.run_experiment()
-    metrics = evaluate.calculate_scoring_metrics(
-        prediction,
-        repo_root / "shinka" / "smoke_ground_truth.geojson",
-    )
+    prediction = initial.run_experiment(validation_data_dir)
 
     assert prediction["type"] == "FeatureCollection"
     assert prediction["features"]
-    assert metrics["combined_score"] == pytest.approx(1.0)
-    assert metrics["year_accuracy"] == pytest.approx(1.0)
 
 
 def test_initial_seed_program_has_30_minute_training_timeout() -> None:

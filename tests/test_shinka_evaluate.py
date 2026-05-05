@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import date
 from pathlib import Path
 
 import geopandas as gpd
+import numpy as np
 import pytest
+import rasterio
+from rasterio.transform import from_origin
 from shapely.geometry import box, mapping
 
 
@@ -45,6 +49,76 @@ def _feature_collection(geometry, properties: dict) -> dict:
             }
         ],
     }
+
+
+def _write_label_raster(path: Path, data: np.ndarray, dtype: str = "uint16") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    height, width = data.shape
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=height,
+        width=width,
+        count=1,
+        dtype=dtype,
+        crs="EPSG:4326",
+        transform=from_origin(0.0, 0.001, 0.001, 0.001),
+        nodata=0,
+    ) as dst:
+        dst.write(data.astype(dtype), 1)
+
+
+def _write_glads2_validation_truth(
+    validation_data_dir: Path,
+    *,
+    tile_id: str = "tile_a",
+    time_step: int = 2204,
+) -> None:
+    label_dir = validation_data_dir / "labels" / "glads2"
+    alert = np.ones((1, 1), dtype=np.uint8) * 4
+    year = 2000 + time_step // 100
+    month = time_step % 100
+    offset = (date(year, month, 1) - date(2019, 1, 1)).days
+    alert_date = np.ones((1, 1), dtype=np.uint16) * offset
+    _write_label_raster(label_dir / f"glads2_{tile_id}_alert.tif", alert, dtype="uint8")
+    _write_label_raster(
+        label_dir / f"glads2_{tile_id}_alertDate.tif",
+        alert_date,
+        dtype="uint16",
+    )
+
+
+def test_load_validation_ground_truth_decodes_supported_label_sources(
+    tmp_path: Path,
+) -> None:
+    validation_data_dir = tmp_path / "validation"
+
+    _write_label_raster(
+        validation_data_dir / "labels" / "radd" / "radd_tile_r_labels.tif",
+        np.asarray([[30055]], dtype=np.uint16),
+        dtype="uint16",
+    )
+    _write_label_raster(
+        validation_data_dir / "labels" / "gladl" / "gladl_tile_l_alert22.tif",
+        np.asarray([[3]], dtype=np.uint8),
+        dtype="uint8",
+    )
+    _write_label_raster(
+        validation_data_dir / "labels" / "gladl" / "gladl_tile_l_alertDate22.tif",
+        np.asarray([[91]], dtype=np.uint16),
+        dtype="uint16",
+    )
+    _write_glads2_validation_truth(validation_data_dir, tile_id="tile_s")
+
+    ground_truth = shinka_evaluate.load_validation_ground_truth(validation_data_dir)
+
+    assert set(ground_truth["label_source"]) == {"radd", "gladl", "glads2"}
+    assert set(ground_truth["tile_id"]) == {"tile_r", "tile_l", "tile_s"}
+    assert set(ground_truth["time_step"]) == {1502, 2204}
+    assert set(ground_truth["year"]) == {2015, 2022}
+    assert not ground_truth.empty
+    assert ground_truth.crs == "EPSG:4326"
 
 
 def test_calculate_scoring_metrics_scores_perfect_spatial_and_year_match() -> None:
@@ -88,17 +162,20 @@ def test_calculate_scoring_metrics_penalizes_wrong_years_by_area() -> None:
     assert metrics["year_accuracy"] == pytest.approx(0.0)
 
 
-def test_main_writes_shinka_metrics_files(tmp_path: Path) -> None:
+def test_main_scores_against_validation_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validation_data_dir = tmp_path / "validation"
+    validation_data_dir.mkdir()
+    _write_glads2_validation_truth(validation_data_dir)
+    monkeypatch.setattr(shinka_evaluate, "VALIDATION_DATA_DIR", validation_data_dir)
+
     geometry = box(0, 0, 0.001, 0.001)
     prediction_path = tmp_path / "prediction.geojson"
-    ground_truth_path = tmp_path / "ground_truth.geojson"
     results_dir = tmp_path / "results"
     prediction_path.write_text(
         json.dumps(_feature_collection(geometry, {"time_step": 2204})),
-        encoding="utf-8",
-    )
-    ground_truth_path.write_text(
-        json.dumps(_feature_collection(geometry, {"year": 2022})),
         encoding="utf-8",
     )
 
@@ -106,8 +183,6 @@ def test_main_writes_shinka_metrics_files(tmp_path: Path) -> None:
         [
             "--prediction_path",
             str(prediction_path),
-            "--ground_truth_path",
-            str(ground_truth_path),
             "--results_dir",
             str(results_dir),
         ]
@@ -119,39 +194,38 @@ def test_main_writes_shinka_metrics_files(tmp_path: Path) -> None:
     assert exit_code == 0
     assert correct == {"correct": True, "error": None}
     assert metrics["combined_score"] == pytest.approx(1.0)
+    assert metrics["union_iou"] == pytest.approx(1.0)
     assert metrics["year_accuracy"] == pytest.approx(1.0)
 
 
-def test_main_marks_candidate_timeout_as_failure(tmp_path: Path) -> None:
+def test_main_marks_candidate_timeout_as_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     if not hasattr(shinka_evaluate.signal, "SIGALRM"):
         pytest.skip("SIGALRM is unavailable on this platform")
 
+    validation_data_dir = tmp_path / "validation"
+    validation_data_dir.mkdir()
+    monkeypatch.setattr(shinka_evaluate, "VALIDATION_DATA_DIR", validation_data_dir)
     program_path = tmp_path / "slow_program.py"
-    ground_truth_path = tmp_path / "ground_truth.geojson"
     results_dir = tmp_path / "results"
     program_path.write_text(
         "\n".join(
             [
                 "import time",
                 "",
-                "def run_experiment():",
+                "def run_experiment(validation_data_dir):",
                 "    time.sleep(2)",
                 "    return {'type': 'FeatureCollection', 'features': []}",
             ]
         ),
         encoding="utf-8",
     )
-    ground_truth_path.write_text(
-        json.dumps(_feature_collection(box(0, 0, 0.001, 0.001), {"year": 2022})),
-        encoding="utf-8",
-    )
-
     exit_code = shinka_evaluate.main(
         [
             "--program_path",
             str(program_path),
-            "--ground_truth_path",
-            str(ground_truth_path),
             "--results_dir",
             str(results_dir),
             "--run_timeout_seconds",
