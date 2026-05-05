@@ -2,9 +2,9 @@
 #   shinka_run --task-dir shinka --config-fname shinka.yaml \
 #     --results_dir results/shinka_simple_ml --num_generations 100
 #
-# The evaluator passes data/makeathon-challenge/validation to candidate
-# programs as unlabeled prediction input, then reads validation labels itself
-# for scoring.
+# The evaluator owns held-out scoring data and labels. It first calls the
+# candidate training entry point, then passes only an unlabeled feature input
+# view to candidate inference.
 
 max_evaluation_jobs: 2
 max_proposal_jobs: 4
@@ -14,14 +14,15 @@ verbose: true
 evo:
   task_sys_msg: |
     You are evolving shinka/initial.py for the osapiens Makeathon 2026
-    deforestation challenge. The program must define
-    run_experiment(validation_data_dir) and return a GeoJSON FeatureCollection,
-    a GeoDataFrame, a path, or a dict containing a GeoJSON/path.
-    validation_data_dir is hardcoded by shinka/evaluate.py to
-    data/makeathon-challenge/validation. Candidate programs must treat that
-    directory as unlabeled prediction input. The evaluator separately reads
-    validation labels for scoring, so useful changes should improve spatial
-    precision/recall without breaking time_step/year properties.
+    deforestation challenge. The program must define run_experiment() for
+    training and run_inference(model, prediction_data_dir) for inference.
+    run_experiment() must train from data/makeathon-challenge/training and
+    return whatever model object run_inference needs. The evaluator supplies
+    prediction_data_dir only to run_inference, as an unlabeled feature input.
+    run_inference must return a GeoJSON FeatureCollection, a GeoDataFrame, a
+    path, or a dict containing a GeoJSON/path. The evaluator separately reads
+    scoring labels, so useful changes should improve spatial precision/recall
+    without breaking time_step/year properties.
 
     Use simple ML ideas from deep-research-report.md before reaching for deep
     models. Prioritize compact, robust code that can run locally in minutes.
@@ -29,11 +30,12 @@ evo:
     Shallow model ideas:
     - Train and blend XGBoost, LightGBM, and SVM/RBF models over engineered
       patch or pixel features. Average calibrated probabilities first; only add
-      stacking if there is a real validation signal.
+      stacking if there is a real training-only CV signal.
     - Keep a fixed physics-inspired prior in the ensemble so candidates remain
       sensible when labels are weak or sparse.
-    - Tune one global threshold against validation polygon IoU or pixel IoU,
-      then consider separate high-recall and high-precision variants.
+    - Tune one global threshold through Shinka evaluator feedback or
+      training-only CV, then consider separate high-recall and
+      high-precision variants.
     - Try bagged shallow ensembles over bootstrap samples, feature subsets, and
       conservative/high-recall thresholds.
 
@@ -56,14 +58,20 @@ evo:
       small-polygon filtering, while preserving valid EPSG:4326 GeoJSON output.
 
     Hard constraints:
-    - Keep run_experiment() deterministic and bounded.
-    - Keep each evaluated model/training run under 30 minutes. Preserve
+    - Keep run_experiment() deterministic and bounded. It must not accept or
+      read prediction/evaluation data.
+    - Keep run_inference(model, prediction_data_dir) as inference-only code:
+      apply the already-trained model to feature rasters and return predictions.
+    - Keep the full trained model build under 30 minutes, whether the candidate
+      trains one estimator or an ensemble. Preserve
       TRAINING_TIMEOUT_SECONDS = 30 * 60, prefer model-native max_iter,
-      n_estimators, early-stopping, and n_jobs controls, and do not remove the
-      evaluator run_timeout_seconds guard.
+      n_estimators, early-stopping, and n_jobs controls.
+    - Keep the evaluator candidate execution window at 40 minutes. Preserve
+      DEFAULT_RUN_TIMEOUT_SECONDS = 40 * 60 and do not remove the evaluator
+      run_timeout_seconds guard.
     - Train only from data/makeathon-challenge/training features and labels.
-    - Read only feature rasters from the provided validation_data_dir; never
-      read labels from that prediction directory inside initial.py.
+    - Read only feature rasters from the provided prediction_data_dir inside
+      run_inference; never train from that directory.
     - Do not silently reinterpret raw labels without explicit decoding logic.
     - Keep edits inside # EVOLVE-BLOCK-START / # EVOLVE-BLOCK-END regions and
       preserve those markers for future generations.
@@ -122,9 +130,9 @@ db:
   exploitation_ratio: 0.25
 
 job:
-  # The evaluator enforces 1800 seconds for candidate execution; this gives it
+  # The evaluator enforces 2400 seconds for candidate execution; this gives it
   # a short grace window to write failure metrics before the job wrapper kills it.
-  time: "00:31:00"
+  time: "00:41:00"
   numeric_threads_per_job: 1
   extra_cmd_args:
-    run_timeout_seconds: 1800
+    run_timeout_seconds: 2400

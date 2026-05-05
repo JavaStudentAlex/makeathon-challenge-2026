@@ -17,6 +17,7 @@ import threading
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import geopandas as gpd
@@ -31,7 +32,7 @@ from shapely.validation import make_valid
 
 DEFAULT_INPUT_CRS = "EPSG:4326"
 DEFAULT_AREA_CRS = "EPSG:6933"
-DEFAULT_RUN_TIMEOUT_SECONDS = 30 * 60
+DEFAULT_RUN_TIMEOUT_SECONDS = 40 * 60
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VALIDATION_DATA_DIR = REPO_ROOT / "data" / "makeathon-challenge" / "validation"
 COMBINED_SCORE_WEIGHTS = {
@@ -568,7 +569,7 @@ def _wall_time_limit(seconds: int):
 
     def _raise_timeout(_signum, _frame) -> None:
         raise TimeoutError(
-            f"candidate execution exceeded {seconds} seconds; keep training bounded"
+            f"candidate execution exceeded {seconds} seconds; keep evaluation bounded"
         )
 
     signal.signal(signal.SIGALRM, _raise_timeout)
@@ -601,20 +602,45 @@ def _prediction_from_program(
         run_experiment = getattr(module, "run_experiment", None)
         if run_experiment is None or not callable(run_experiment):
             raise AttributeError("Candidate program must define run_experiment()")
-        result = run_experiment(validation_data_dir=_validation_data_dir())
+        run_inference = getattr(module, "run_inference", None)
+        if run_inference is None or not callable(run_inference):
+            raise AttributeError("Candidate program must define run_inference()")
 
+        model = run_experiment()
+        with _feature_only_data_dir(_validation_data_dir()) as prediction_data_dir:
+            result = run_inference(model, prediction_data_dir=prediction_data_dir)
+            return _coerce_prediction_result(result)
+
+
+def _coerce_prediction_result(result: Any) -> GeoJSONInput:
     if isinstance(result, dict) and result.get("type") == "FeatureCollection":
         return result
     if isinstance(result, dict):
         for key in ("geojson", "prediction_geojson", "prediction_path", "path"):
             if key in result:
-                return result[key]
-    if isinstance(result, (str, Path, gpd.GeoDataFrame)):
+                return _coerce_prediction_result(result[key])
+    if isinstance(result, gpd.GeoDataFrame):
         return result
+    if isinstance(result, (str, Path)):
+        return _load_geodataframe(result, default_input_crs=DEFAULT_INPUT_CRS)
     raise ValueError(
-        "run_experiment() must return a FeatureCollection, GeoDataFrame, path, "
+        "run_inference() must return a FeatureCollection, GeoDataFrame, path, "
         "or a dict containing geojson/prediction_geojson/prediction_path"
     )
+
+
+@contextmanager
+def _feature_only_data_dir(data_dir: Path):
+    with TemporaryDirectory(prefix="shinka-inference-") as temp_name:
+        feature_dir = Path(temp_name)
+        for child in data_dir.iterdir():
+            if child.name == "labels":
+                continue
+            (feature_dir / child.name).symlink_to(
+                child,
+                target_is_directory=child.is_dir(),
+            )
+        yield feature_dir
 
 
 def _validation_data_dir() -> Path:
@@ -661,7 +687,7 @@ def build_argparser() -> argparse.ArgumentParser:
         type=_bounded_run_timeout_seconds,
         default=DEFAULT_RUN_TIMEOUT_SECONDS,
         help=(
-            "Wall-time limit for candidate import and run_experiment execution; "
+            "Wall-time limit for candidate import, training, and inference; "
             f"default {DEFAULT_RUN_TIMEOUT_SECONDS} seconds"
         ),
     )

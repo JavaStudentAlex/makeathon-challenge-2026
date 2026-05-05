@@ -26,6 +26,10 @@ def _load_evaluate_module():
 shinka_evaluate = _load_evaluate_module()
 
 
+def test_evaluator_default_candidate_execution_timeout_is_40_minutes() -> None:
+    assert shinka_evaluate.DEFAULT_RUN_TIMEOUT_SECONDS == 40 * 60
+
+
 def _gdf(
     rows: list[tuple[object, dict]],
     *,
@@ -198,6 +202,39 @@ def test_main_scores_against_validation_labels(
     assert metrics["year_accuracy"] == pytest.approx(1.0)
 
 
+def test_prediction_from_program_splits_training_and_feature_only_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validation_data_dir = tmp_path / "validation"
+    (validation_data_dir / "aef-embeddings").mkdir(parents=True)
+    (validation_data_dir / "labels").mkdir()
+    monkeypatch.setattr(shinka_evaluate, "VALIDATION_DATA_DIR", validation_data_dir)
+    program_path = tmp_path / "candidate_program.py"
+    program_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "",
+                "def run_experiment():",
+                "    return {'trained': True}",
+                "",
+                "def run_inference(model, prediction_data_dir):",
+                "    prediction_data_dir = Path(prediction_data_dir)",
+                "    assert model == {'trained': True}",
+                "    assert (prediction_data_dir / 'aef-embeddings').exists()",
+                "    assert not (prediction_data_dir / 'labels').exists()",
+                "    return {'type': 'FeatureCollection', 'features': []}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    prediction = shinka_evaluate._prediction_from_program(program_path)
+
+    assert prediction == {"type": "FeatureCollection", "features": []}
+
+
 def test_main_marks_candidate_timeout_as_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -215,8 +252,11 @@ def test_main_marks_candidate_timeout_as_failure(
             [
                 "import time",
                 "",
-                "def run_experiment(validation_data_dir):",
+                "def run_experiment():",
                 "    time.sleep(2)",
+                "    return object()",
+                "",
+                "def run_inference(model, prediction_data_dir):",
                 "    return {'type': 'FeatureCollection', 'features': []}",
             ]
         ),

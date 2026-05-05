@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import importlib.util
 from datetime import date
 from pathlib import Path
@@ -84,12 +85,14 @@ def test_initial_seed_trains_from_training_labels_and_predicts_unlabeled_input(
     _write_synthetic_prediction_tree(prediction_data_dir)
     initial.TRAINING_DATA_DIR = training_data_dir
 
-    prediction = initial.run_experiment(prediction_data_dir, threshold=0.05)
+    model = initial.run_experiment()
+    prediction = initial.run_inference(model, prediction_data_dir, threshold=0.05)
 
     assert prediction["type"] == "FeatureCollection"
     assert prediction["features"]
     assert not (prediction_data_dir / "labels").exists()
     assert prediction["features"][0]["properties"]["time_step"] == 2107
+    assert inspect.signature(initial.run_experiment).parameters == {}
 
 
 def test_initial_seed_program_has_30_minute_training_timeout() -> None:

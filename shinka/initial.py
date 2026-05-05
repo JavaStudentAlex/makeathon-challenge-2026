@@ -1,10 +1,9 @@
 """Initial Shinka seed program trained from training labels only.
 
-Training labels are used only as supervision for the hardcoded training split
-under ``data/makeathon-challenge/training``. The directory passed to
-``run_experiment`` is treated as unlabeled prediction input; this module never
-reads labels from that directory and does not consume a train/validation split
-JSON file.
+``run_experiment`` trains from the hardcoded training split under
+``data/makeathon-challenge/training`` and returns the trained model object.
+``run_inference`` applies that model to an unlabeled prediction input directory
+and returns GeoJSON predictions.
 """
 
 # EVOLVE-BLOCK-START
@@ -16,6 +15,7 @@ import warnings
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
+from time import monotonic
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -73,7 +73,7 @@ class EnsembleMember(NamedTuple):
 
 @contextmanager
 def _wall_time_limit(seconds: int):
-    """Bound local model fitting so evolved candidates cannot hang indefinitely."""
+    """Bound candidate training so evolved programs cannot hang indefinitely."""
 
     if (
         seconds <= 0
@@ -85,21 +85,32 @@ def _wall_time_limit(seconds: int):
 
     previous_handler = signal.getsignal(signal.SIGALRM)
     previous_remaining = signal.alarm(0)
+    started_at = monotonic()
+    effective_seconds = (
+        min(seconds, previous_remaining) if previous_remaining > 0 else seconds
+    )
 
     def _raise_timeout(_signum, _frame) -> None:
+        if previous_remaining > 0 and previous_remaining <= seconds:
+            if callable(previous_handler):
+                previous_handler(_signum, _frame)
+            raise TimeoutError(
+                f"outer execution exceeded {previous_remaining} seconds"
+            )
         raise TimeoutError(
-            f"model fitting exceeded {seconds} seconds; keep training bounded"
+            f"training exceeded {seconds} seconds; keep training bounded"
         )
 
     signal.signal(signal.SIGALRM, _raise_timeout)
-    signal.alarm(seconds)
+    signal.alarm(effective_seconds)
     try:
         yield
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous_handler)
         if previous_remaining > 0:
-            signal.alarm(previous_remaining)
+            elapsed = max(0, int(monotonic() - started_at))
+            signal.alarm(max(1, previous_remaining - elapsed))
 
 
 def _row(**overrides: float) -> dict[str, float]:
@@ -224,8 +235,7 @@ def _fit_ensemble(x_train: np.ndarray, y_train: np.ndarray) -> list[EnsembleMemb
             n_jobs=1,
             verbosity=0,
         )
-        with _wall_time_limit(TRAINING_TIMEOUT_SECONDS):
-            xgb.fit(x_train, y_train)
+        xgb.fit(x_train, y_train)
         members.append(EnsembleMember("xgboost", xgb, 0.42))
     except Exception:
         pass
@@ -247,8 +257,7 @@ def _fit_ensemble(x_train: np.ndarray, y_train: np.ndarray) -> list[EnsembleMemb
             verbosity=-1,
             force_col_wise=True,
         )
-        with _wall_time_limit(TRAINING_TIMEOUT_SECONDS):
-            lgbm.fit(x_train, y_train)
+        lgbm.fit(x_train, y_train)
         members.append(EnsembleMember("lightgbm", lgbm, 0.42))
     except Exception:
         pass
@@ -265,8 +274,7 @@ def _fit_ensemble(x_train: np.ndarray, y_train: np.ndarray) -> list[EnsembleMemb
                 max_iter=1000,
             ),
         )
-        with _wall_time_limit(TRAINING_TIMEOUT_SECONDS):
-            svm.fit(x_train, y_train)
+        svm.fit(x_train, y_train)
         members.append(EnsembleMember("svm_rbf", svm, 0.16))
     except Exception:
         pass
@@ -785,31 +793,39 @@ def _year_from_time_step(value: Any) -> int | None:
     return None
 
 
-def run_experiment(
-    validation_data_dir: str | Path,
+def run_experiment() -> list[EnsembleMember]:
+    """Train on hardcoded training data and return the trained model."""
+
+    with _wall_time_limit(TRAINING_TIMEOUT_SECONDS):
+        x_train, y_train = _build_training_examples(TRAINING_DATA_DIR)
+        return _fit_ensemble(x_train, y_train)
+
+
+def run_inference(
+    model: list[EnsembleMember],
+    prediction_data_dir: str | Path,
     threshold: float = PREDICTION_THRESHOLD,
 ) -> dict[str, Any]:
-    """Train on hardcoded training data, then predict on unlabeled input data."""
+    """Apply a trained model to unlabeled input data and return predictions."""
 
-    prediction_data_dir = Path(validation_data_dir)
+    prediction_data_dir = Path(prediction_data_dir)
     if not prediction_data_dir.is_dir():
         raise FileNotFoundError(
             f"Prediction data directory not found: {prediction_data_dir}"
         )
-    x_train, y_train = _build_training_examples(TRAINING_DATA_DIR)
-    members = _fit_ensemble(x_train, y_train)
-    features = _prediction_candidates(prediction_data_dir, members, threshold)
+    features = _prediction_candidates(prediction_data_dir, model, threshold)
     return {"type": "FeatureCollection", "features": features}
 
 
 if __name__ == "__main__":
     import json
 
-    default_validation_dir = (
+    default_prediction_dir = (
         Path(__file__).resolve().parents[1]
         / "data"
         / "makeathon-challenge"
-        / "validation"
+        / "prediction"
     )
-    print(json.dumps(run_experiment(default_validation_dir), indent=2))
+    trained_model = run_experiment()
+    print(json.dumps(run_inference(trained_model, default_prediction_dir), indent=2))
 # EVOLVE-BLOCK-END
