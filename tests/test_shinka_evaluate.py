@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 from datetime import date
 from pathlib import Path
 
@@ -13,8 +14,7 @@ from rasterio.transform import from_origin
 from shapely.geometry import box, mapping
 
 
-def _load_evaluate_module():
-    module_path = Path(__file__).parents[1] / "shinka" / "evaluate.py"
+def _load_evaluate_module_from_path(module_path: Path):
     spec = importlib.util.spec_from_file_location("local_shinka_evaluate", module_path)
     assert spec is not None
     assert spec.loader is not None
@@ -23,11 +23,35 @@ def _load_evaluate_module():
     return module
 
 
+def _load_evaluate_module():
+    return _load_evaluate_module_from_path(
+        Path(__file__).parents[1] / "shinka" / "evaluate.py"
+    )
+
+
 shinka_evaluate = _load_evaluate_module()
 
 
 def test_evaluator_default_candidate_execution_timeout_is_40_minutes() -> None:
     assert shinka_evaluate.DEFAULT_RUN_TIMEOUT_SECONDS == 40 * 60
+
+
+def test_evaluator_resolves_repo_root_after_shinka_copy(tmp_path: Path) -> None:
+    repo_root = Path(__file__).parents[1]
+    copied_repo = tmp_path / "copied_repo"
+    copied_evaluator = copied_repo / "results" / "simple_ml" / "evaluate.py"
+    copied_evaluator.parent.mkdir(parents=True)
+    (copied_repo / "shinka").mkdir()
+    (copied_repo / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    shutil.copyfile(repo_root / "shinka" / "evaluate.py", copied_evaluator)
+
+    evaluator = _load_evaluate_module_from_path(copied_evaluator)
+
+    assert evaluator.REPO_ROOT == copied_repo
+    assert (
+        evaluator.VALIDATION_DATA_DIR
+        == copied_repo / "data" / "makeathon-challenge" / "validation"
+    )
 
 
 def _gdf(

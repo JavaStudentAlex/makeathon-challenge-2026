@@ -33,7 +33,21 @@ from shapely.validation import make_valid
 DEFAULT_INPUT_CRS = "EPSG:4326"
 DEFAULT_AREA_CRS = "EPSG:6933"
 DEFAULT_RUN_TIMEOUT_SECONDS = 40 * 60
-REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _find_repo_root() -> Path:
+    """Find the repo root even after Shinka copies this file into results/."""
+
+    for start in (Path(__file__).resolve().parent, Path.cwd().resolve()):
+        for candidate in (start, *start.parents):
+            if (candidate / "pyproject.toml").is_file() and (
+                candidate / "shinka"
+            ).is_dir():
+                return candidate
+    return Path(__file__).resolve().parents[1]
+
+
+REPO_ROOT = _find_repo_root()
 VALIDATION_DATA_DIR = REPO_ROOT / "data" / "makeathon-challenge" / "validation"
 COMBINED_SCORE_WEIGHTS = {
     "union_iou": 0.40,

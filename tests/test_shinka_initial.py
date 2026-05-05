@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import importlib.util
+import shutil
 from datetime import date
 from pathlib import Path
 
@@ -100,3 +101,21 @@ def test_initial_seed_program_has_30_minute_training_timeout() -> None:
     initial = _load_module("local_shinka_initial", repo_root / "shinka" / "initial.py")
 
     assert initial.TRAINING_TIMEOUT_SECONDS == 30 * 60
+
+
+def test_initial_seed_resolves_repo_root_after_shinka_copy(tmp_path: Path) -> None:
+    repo_root = Path(__file__).parents[1]
+    copied_repo = tmp_path / "copied_repo"
+    copied_program = copied_repo / "results" / "simple_ml" / "gen_0" / "main.py"
+    copied_program.parent.mkdir(parents=True)
+    (copied_repo / "shinka").mkdir()
+    (copied_repo / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    shutil.copyfile(repo_root / "shinka" / "initial.py", copied_program)
+
+    initial = _load_module("copied_shinka_initial", copied_program)
+
+    assert initial.REPO_ROOT == copied_repo
+    assert (
+        initial.TRAINING_DATA_DIR
+        == copied_repo / "data" / "makeathon-challenge" / "training"
+    )

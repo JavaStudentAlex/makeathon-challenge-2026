@@ -1,4 +1,7 @@
-"""Initial Shinka seed program trained from training labels only.
+# flake8: noqa
+"""Generated Shinka method snapshot: contextual_ensemble_cleanup.
+
+Initial Shinka seed program trained from training labels only.
 
 ``run_experiment`` trains from the hardcoded training split under
 ``data/makeathon-challenge/training`` and returns the trained model object.
@@ -23,9 +26,10 @@ import rasterio
 from rasterio.enums import Resampling
 from rasterio.features import shapes
 from rasterio.warp import reproject, transform_geom
+from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
 
 DEFAULT_OUTPUT_CRS = "EPSG:4326"
 
@@ -59,6 +63,14 @@ FEATURE_NAMES: tuple[str, ...] = (
     "vv_delta",
     "vv_cv_delta",
     "aef_shift",
+    "aef_abs_mean",
+    "aef_abs_std",
+    "aef_pos_frac",
+    "aef_neg_frac",
+    "local_shift_mean",
+    "local_shift_std",
+    "local_shift_max",
+    "local_shift_contrast",
     "alert_consensus",
     "seasonal_drop",
     "ndvi_zscore",
@@ -142,6 +154,14 @@ def _row(**overrides: float) -> dict[str, float]:
         "vv_delta": 0.0,
         "vv_cv_delta": 0.0,
         "aef_shift": 0.0,
+        "aef_abs_mean": 0.0,
+        "aef_abs_std": 0.0,
+        "aef_pos_frac": 0.0,
+        "aef_neg_frac": 0.0,
+        "local_shift_mean": 0.0,
+        "local_shift_std": 0.0,
+        "local_shift_max": 0.0,
+        "local_shift_contrast": 0.0,
         "alert_consensus": 0.0,
         "seasonal_drop": 0.0,
         "ndvi_zscore": 0.0,
@@ -188,6 +208,7 @@ def _build_training_examples(
             if year <= 2020:
                 continue
             feature_grid, profile = _aef_feature_grid(baseline_path, current_path)
+            context_maps = _context_maps(feature_grid)
             if label_targets is None:
                 label_targets = _training_label_targets(
                     training_data_dir,
@@ -201,6 +222,7 @@ def _build_training_examples(
                 rows,
                 labels,
                 feature_grid,
+                context_maps,
                 positive_mask,
                 1,
                 MAX_POSITIVE_SAMPLES_PER_RASTER,
@@ -210,6 +232,7 @@ def _build_training_examples(
                 rows,
                 labels,
                 feature_grid,
+                context_maps,
                 negative_mask,
                 0,
                 MAX_NEGATIVE_SAMPLES_PER_RASTER,
@@ -229,7 +252,7 @@ def _build_training_examples(
 
 
 def _fit_ensemble(x_train: np.ndarray, y_train: np.ndarray) -> list[EnsembleMember]:
-    """Fit XGBoost, LightGBM, and SVM members with safe fallbacks."""
+    """Fit compact tree and linear members with safe fallbacks."""
 
     members: list[EnsembleMember] = []
 
@@ -250,7 +273,7 @@ def _fit_ensemble(x_train: np.ndarray, y_train: np.ndarray) -> list[EnsembleMemb
             verbosity=0,
         )
         xgb.fit(x_train, y_train)
-        members.append(EnsembleMember("xgboost", xgb, 0.42))
+        members.append(EnsembleMember("xgboost", xgb, 0.28))
     except Exception:
         pass
 
@@ -272,24 +295,37 @@ def _fit_ensemble(x_train: np.ndarray, y_train: np.ndarray) -> list[EnsembleMemb
             force_col_wise=True,
         )
         lgbm.fit(x_train, y_train)
-        members.append(EnsembleMember("lightgbm", lgbm, 0.42))
+        members.append(EnsembleMember("lightgbm", lgbm, 0.28))
     except Exception:
         pass
 
     try:
-        svm = make_pipeline(
+        extratrees = ExtraTreesClassifier(
+            n_estimators=120,
+            max_depth=8,
+            min_samples_leaf=2,
+            max_features="sqrt",
+            class_weight="balanced",
+            random_state=RANDOM_STATE + 2,
+            n_jobs=1,
+        )
+        extratrees.fit(x_train, y_train)
+        members.append(EnsembleMember("extratrees", extratrees, 0.24))
+    except Exception:
+        pass
+
+    try:
+        logreg = make_pipeline(
             StandardScaler(),
-            SVC(
-                kernel="rbf",
-                gamma="scale",
+            LogisticRegression(
+                max_iter=500,
                 class_weight="balanced",
-                probability=True,
-                random_state=RANDOM_STATE + 2,
-                max_iter=1000,
+                random_state=RANDOM_STATE + 3,
+                solver="lbfgs",
             ),
         )
-        svm.fit(x_train, y_train)
-        members.append(EnsembleMember("svm_rbf", svm, 0.16))
+        logreg.fit(x_train, y_train)
+        members.append(EnsembleMember("logreg", logreg, 0.20))
     except Exception:
         pass
 
@@ -333,6 +369,18 @@ def _domain_prior_probability(x_values: np.ndarray) -> np.ndarray:
         axis=0,
     )
     semantic_shift = _positive_signal(x_values[:, idx["aef_shift"]], 0.85)
+    local_support = np.mean(
+        np.stack(
+            [
+                _positive_signal(x_values[:, idx["local_shift_mean"]], 1.00),
+                _positive_signal(x_values[:, idx["local_shift_max"]], 1.35),
+                _positive_signal(x_values[:, idx["local_shift_contrast"]], 0.45),
+            ],
+            axis=0,
+        ),
+        axis=0,
+    )
+    band_dispersion = _positive_signal(x_values[:, idx["aef_abs_std"]], 0.60)
     alert = np.clip(x_values[:, idx["alert_consensus"]], 0.0, 1.0)
     forest = np.clip(x_values[:, idx["forest_2020"]], 0.0, 1.0)
     negative_context = np.maximum.reduce(
@@ -347,11 +395,13 @@ def _domain_prior_probability(x_values: np.ndarray) -> np.ndarray:
     )
 
     probability = (
-        0.34 * optical_drop
-        + 0.18 * exposure
-        + 0.16 * sar_drop
-        + 0.16 * semantic_shift
-        + 0.16 * alert
+        0.25 * optical_drop
+        + 0.15 * exposure
+        + 0.15 * sar_drop
+        + 0.15 * semantic_shift
+        + 0.10 * alert
+        + 0.08 * local_support
+        + 0.06 * band_dispersion
         - 0.40 * negative_context
     )
     return np.clip(probability, 0.0, 1.0) * (forest >= 0.5)
@@ -454,14 +504,76 @@ def _aef_feature_grid(
     return delta, profile
 
 
+def _context_maps(feature_grid: np.ndarray) -> dict[str, np.ndarray]:
+    shift_map = np.linalg.norm(feature_grid, axis=0)
+    abs_grid = np.abs(feature_grid)
+    abs_mean_map = abs_grid.mean(axis=0)
+    abs_std_map = abs_grid.std(axis=0)
+    pos_frac_map = (feature_grid > 0).mean(axis=0)
+    neg_frac_map = (feature_grid < 0).mean(axis=0)
+
+    padded_shift = np.pad(shift_map, 1, mode="edge")
+    neighbourhood = (
+        padded_shift[:-2, :-2],
+        padded_shift[:-2, 1:-1],
+        padded_shift[:-2, 2:],
+        padded_shift[1:-1, :-2],
+        padded_shift[1:-1, 1:-1],
+        padded_shift[1:-1, 2:],
+        padded_shift[2:, :-2],
+        padded_shift[2:, 1:-1],
+        padded_shift[2:, 2:],
+    )
+    local_shift_mean = sum(neighbourhood) / 9.0
+    padded_shift_sq = np.pad(np.square(shift_map), 1, mode="edge")
+    neighbourhood_sq = (
+        padded_shift_sq[:-2, :-2],
+        padded_shift_sq[:-2, 1:-1],
+        padded_shift_sq[:-2, 2:],
+        padded_shift_sq[1:-1, :-2],
+        padded_shift_sq[1:-1, 1:-1],
+        padded_shift_sq[1:-1, 2:],
+        padded_shift_sq[2:, :-2],
+        padded_shift_sq[2:, 1:-1],
+        padded_shift_sq[2:, 2:],
+    )
+    local_shift_std = np.sqrt(
+        np.maximum(sum(neighbourhood_sq) / 9.0 - np.square(local_shift_mean), 0.0)
+    )
+    local_shift_max = np.maximum.reduce(neighbourhood)
+    local_shift_contrast = shift_map - local_shift_mean
+
+    return {
+        "shift_map": shift_map,
+        "aef_abs_mean_map": abs_mean_map,
+        "aef_abs_std_map": abs_std_map,
+        "aef_pos_frac_map": pos_frac_map,
+        "aef_neg_frac_map": neg_frac_map,
+        "local_shift_mean_map": local_shift_mean,
+        "local_shift_std_map": local_shift_std,
+        "local_shift_max_map": local_shift_max,
+        "local_shift_contrast_map": local_shift_contrast,
+    }
+
+
 def _feature_row_from_grid(
-    feature_grid: np.ndarray, row: int, col: int
+    feature_grid: np.ndarray,
+    row: int,
+    col: int,
+    context_maps: dict[str, np.ndarray],
 ) -> dict[str, float]:
     deltas = feature_grid[:, row, col]
-    aef_shift = float(np.linalg.norm(deltas) / max(len(AEF_BAND_INDEXES), 1) ** 0.5)
     values = _row(
         forest_2020=1.0,
-        aef_shift=aef_shift,
+        aef_shift=float(context_maps["shift_map"][row, col]),
+        aef_abs_mean=float(context_maps["aef_abs_mean_map"][row, col]),
+        aef_abs_std=float(context_maps["aef_abs_std_map"][row, col]),
+        aef_pos_frac=float(context_maps["aef_pos_frac_map"][row, col]),
+        aef_neg_frac=float(context_maps["aef_neg_frac_map"][row, col]),
+        local_shift_mean=float(context_maps["local_shift_mean_map"][row, col]),
+        local_shift_std=float(context_maps["local_shift_std_map"][row, col]),
+        local_shift_max=float(context_maps["local_shift_max_map"][row, col]),
+        local_shift_contrast=float(context_maps["local_shift_contrast_map"][row, col]),
         ndvi_delta=float(-deltas[0]) if deltas.size > 0 else 0.0,
         nbr_delta=float(-deltas[1]) if deltas.size > 1 else 0.0,
         ndmi_delta=float(-deltas[2]) if deltas.size > 2 else 0.0,
@@ -476,6 +588,7 @@ def _append_sampled_examples(
     rows: list[dict[str, float]],
     labels: list[int],
     feature_grid: np.ndarray,
+    context_maps: dict[str, np.ndarray],
     mask: np.ndarray,
     label: int,
     max_samples: int,
@@ -487,7 +600,9 @@ def _append_sampled_examples(
     count = min(max_samples, len(locations))
     selected_indexes = rng.choice(len(locations), size=count, replace=False)
     for row, col in locations[selected_indexes]:
-        rows.append(_feature_row_from_grid(feature_grid, int(row), int(col)))
+        rows.append(
+            _feature_row_from_grid(feature_grid, int(row), int(col), context_maps)
+        )
         labels.append(label)
 
 
@@ -667,8 +782,9 @@ def _prediction_candidates(
             if year <= 2020:
                 continue
             feature_grid, profile = _aef_feature_grid(baseline_path, current_path)
+            context_maps = _context_maps(feature_grid)
             rows = [
-                _feature_row_from_grid(feature_grid, row, col)
+                _feature_row_from_grid(feature_grid, row, col, context_maps)
                 for row in range(feature_grid.shape[1])
                 for col in range(feature_grid.shape[2])
             ]
@@ -705,26 +821,37 @@ def _polygonize_prediction_mask(
 ) -> list[dict[str, Any]]:
     if not np.any(positive):
         return []
+
+    from scipy.ndimage import label as connected_components
+
+    component_labels, num_components = connected_components(positive.astype(np.uint8))
+    if num_components == 0:
+        return []
+
     features: list[dict[str, Any]] = []
-    values = np.where(positive, time_step, 0).astype(np.int32)
-    for geometry, value in shapes(
-        values,
-        mask=positive,
-        transform=profile["transform"],
-    ):
-        feature_time_step = int(value)
-        features.append(
-            {
-                "type": "Feature",
-                "geometry": _to_output_crs(geometry, profile["crs"]),
-                "properties": {
-                    "tile_id": tile_id,
-                    "time_step": feature_time_step,
-                    "year": _year_from_time_step(feature_time_step),
-                    "model_ensemble": model_ensemble,
-                },
-            }
-        )
+    for component_id in range(1, num_components + 1):
+        component = component_labels == component_id
+        if int(component.sum()) < 3:
+            continue
+        values = np.where(component, time_step, 0).astype(np.int32)
+        for geometry, value in shapes(
+            values,
+            mask=component,
+            transform=profile["transform"],
+        ):
+            feature_time_step = int(value)
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": _to_output_crs(geometry, profile["crs"]),
+                    "properties": {
+                        "tile_id": tile_id,
+                        "time_step": feature_time_step,
+                        "year": _year_from_time_step(feature_time_step),
+                        "model_ensemble": model_ensemble,
+                    },
+                }
+            )
     return features
 
 

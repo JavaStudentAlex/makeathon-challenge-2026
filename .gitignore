@@ -39,3 +39,4 @@ vendor/
 coverage/
 .cache/
 tmp/
+catboost_info

@@ -6,8 +6,8 @@
 # candidate training entry point, then passes only an unlabeled feature input
 # view to candidate inference.
 
-max_evaluation_jobs: 2
-max_proposal_jobs: 2
+max_evaluation_jobs: 4
+max_proposal_jobs: 4
 max_db_workers: 2
 verbose: true
 
@@ -173,13 +173,13 @@ evo:
   max_patch_resamples: 2
   max_patch_attempts: 1
   max_novelty_attempts: 1
-  # Keep proposal concurrency matched to evaluator slots on CPU-only local runs.
-  # Evaluations are the bottleneck for this raster-heavy task, so avoid building
-  # a proposal backlog ahead of completed scoring feedback.
+  # Keep proposal capacity matched to evaluator slots on this memory-limited
+  # local machine; on this 8-core host the installed runner caps proposal
+  # workers at 4, so an extra proposal buffer would be a no-op.
   enable_controlled_oversubscription: false
   proposal_target_mode: fixed
   proposal_buffer_max: 0
-  proposal_target_hard_cap: 2
+  proposal_target_hard_cap: 4
   meta_rec_interval: 5
   # Source the repo .env or shell profile before running so CUSTOM_OPENAI_API_KEY is available
   # to the local OpenAI-compatible proxy used for proposal models.
@@ -196,7 +196,7 @@ evo:
       - 0.0
       - 0.5
       - 1.0
-    max_tokens: 16384
+    max_tokens: 32768
   # Direct Ollama embeddings server exposed via OpenAI-compatible /v1.
   embedding_model: local/qwen3-embedding:8b@http://localhost:11434/v1
   code_embed_sim_threshold: 0.995
